@@ -3,7 +3,7 @@
 > **项目已开源：<https://github.com/landesou/tdisplay-s3-pc-monitor>**
 > 代码、设计文档、踩坑日志都在里面，MIT 协议。本文是完整实现记录。
 
-![T-Display-S3 性能监控仪表盘实机效果](https://raw.githubusercontent.com/landesou/tdisplay-s3-pc-monitor/main/docs/images/device.jpg)
+![T-Display-S3 性能监控仪表盘实机效果](https://cdn.jsdelivr.net/gh/landesou/tdisplay-s3-pc-monitor@main/docs/images/device-cover.jpg)
 
 > 屏上实时显示：GPU 占用/温度/功耗、内存、网速、CPU 占用/频率 + 60 点历史曲线。
 
@@ -294,7 +294,7 @@ gpio_set_level(BOARD_LCD_RD, 1);            /* RD 高 = 非读状态 */
 
 ## 十、实机验证结果
 
-![T-Display-S3 性能监控仪表盘实机](https://raw.githubusercontent.com/landesou/tdisplay-s3-pc-monitor/main/docs/images/device.jpg)
+![T-Display-S3 性能监控仪表盘实机](https://cdn.jsdelivr.net/gh/landesou/tdisplay-s3-pc-monitor@main/docs/images/device.jpg)
 
 > 实机照片：亚克力外壳是成品自带的。拍这张时链路走的是 Wi-Fi——顶栏右侧绿点是状态灯，
 > `WIFI 0s` 表示「Wi-Fi 在线、距上一帧 0 秒」；GPU 卡片的 74 °C / 41 W 来自 `nvidia-smi`，
