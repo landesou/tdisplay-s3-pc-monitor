@@ -441,6 +441,29 @@ logicprobe 建模时立的三条不变式，现在有了实机证据：
 **已知未做**：实机照片（README 已标注待补）、CPU 温度（硬件限制）、帧率与长时间稳定性实测、
 WiFi 断线重连/漫游、3D 打印外壳。
 
+### M10 发布后的安全事故与补救（2026-11-10，记录教训）
+
+**问题**：第一次推送后自查发现，仓库历史和文件里带进了两处敏感信息——**WiFi 密码**（写进了 journal 的
+WiFi 验证表格）和**真实的 Bearer Token**（写死在 `companion/tests/test_tray.py` 的测试常量里）。
+仓库当时是 Public。
+
+**补救步骤**（已全部完成，可复用）：
+1. 工作区先脱敏：journal 里密码换成 `<redacted>`，测试里的 token 换成 `DUMMY-TOKEN-FOR-TESTS`；
+2. `git filter-branch --tree-filter` 重写**全部提交**，逐文件 sed 替换这两串；
+3. 删掉 filter-branch 的备份引用 `refs/original/*`，`git reflog expire --expire=now --all` +
+   `git gc --prune=now --aggressive`，让旧对象真正不可达；
+4. `git push --force` 覆盖远端历史；
+5. 复验：`git grep` 扫 `git rev-list --all`（含 origin/main）→ **命中 0**，本地/远端 HEAD 一致。
+
+**教训**：
+- 「把调试过程原样写进 journal」是个好习惯，但**凭据要在写进去的那一刻就脱敏**，不能等发布前再查；
+- 测试夹具里的 token 即使是"本地随便一个值"，也**绝不要复制真实的**；
+- 发布前跑一遍 `git grep -I -E "<密码>|<token>" $(git rev-list --all)` 应该是必做动作；
+- 已经推送过的历史即使 force-push 覆盖，GitHub 侧仍可能短期保留不可达对象 → 这种时候最稳的是
+  **直接轮换凭据**（换 token / 换 WiFi 密码），而不是只靠改历史。
+
+> 本文档后续所有命令、日志、配置示例里，密码与 token 均已脱敏为占位符。
+
 ### 团队分工（2026-11-10 开工）
 
 | 成员 | 负责 | 写作用域 | 任务 |
