@@ -227,7 +227,13 @@ class TrayIcon:
     # ---- pystray 回调 ----
 
     def _setup(self, icon) -> None:
-        """pystray 在图标就绪后调用（独立线程）：首刷 + 每秒刷新。"""
+        """pystray 图标就绪后调用（独立线程）：先显示图标，再首刷 + 每秒刷新。
+
+        注意：**自定义 setup 必须显式 `icon.visible = True`**。pystray 只有在
+        `run(setup=None)` 时才会自动显示图标，传自定义 setup 时不会——真机验收
+        抓到的坑：不设的话图标永远不出现，日志却一切正常。
+        """
+        icon.visible = True
         self._refresh(icon)
         while not self._stop.is_set():
             self._stop.wait(REFRESH_S)
@@ -239,6 +245,7 @@ class TrayIcon:
         try:
             status = self._safe_status()
             LOGGER.debug("托盘刷新：%s（USB=%s）", status.color, status.usb_port if status.usb_connected else "未连接")
+            LOGGER.debug("tooltip=%s", status.tooltip())
             icon.icon = _draw_icon(status.rgb)
             icon.title = status.tooltip()
             icon.update_menu()

@@ -115,6 +115,7 @@ class FakeIcon:
         self.run_called = False
         self.stopped = False
         self.updates = 0
+        self.visible = False  # pystray：自定义 setup 必须显式置 True 才会显示
 
     def run(self, setup=None):
         self.run_called = True
@@ -162,6 +163,17 @@ def wait_for(predicate, timeout: float = 3.0) -> bool:
             return True
         time.sleep(0.01)
     return False
+
+
+def test_setup_makes_icon_visible(monkeypatch):
+    """真机坑回归：pystray 传自定义 setup 时不会自动显示，必须在 _setup 里置 True。"""
+    install_fake_pystray(monkeypatch)
+    tray_icon = TrayIcon(lambda: make_status(), lambda: None)
+    fake_icon = FakeIcon("pcmond", "fake-image", "tip", FakeMenu())
+    tray_icon._stop.set()  # 只跑首刷，不进刷新循环
+    tray_icon._setup(fake_icon)
+    assert fake_icon.visible is True
+    assert fake_icon.updates >= 1  # 菜单已刷新
 
 
 def test_start_runs_pystray_in_daemon_thread(monkeypatch):
