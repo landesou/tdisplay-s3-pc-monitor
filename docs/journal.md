@@ -393,6 +393,22 @@ logicprobe 建模时立的三条不变式，现在有了实机证据：
 这条比"模型验证"更硬的证据意义在于：**状态机不是纸上谈兵**，PC 端断流这一点在真机上确实被 3 秒内捕捉到了，
 而且没有出现"卡在 STALE 不恢复"或"旧数据冒充在线"这两种最典型的监控类 bug。
 
+### M8 WiFi 双模实机验证通过（2026-11-10）
+
+| 步骤 | 结果 |
+|---|---|
+| 串口配置：`wifi LAN_HotPoint <redacted>` / `url http://10.21.132.85:8787/api/stats` / `token <24字符>` | 全部 `ESP_OK`，`cfg` 回显正确（token 只显前 4 位） |
+| 设备连 AP | `wifi:connected with LAN_HotPoint, channel 11, rssi -50`，DHCP 拿到 **10.21.132.204** |
+| 设备轮询 HTTP | `netstat` 抓到设备 IP 每秒向 `10.21.132.85:8787` 建连（ESTABLISHED/SYN_RECEIVED） |
+| **端到端** | 把上位机切成**只用 HTTP**（`pcmond --no-usb`，USB 完全不出帧）后，用户确认**屏幕数字仍在实时变化** |
+
+这条验证很关键：它证明「USB CDC」和「WiFi HTTP」两条链路不是"代码写了但只有一条能用"，
+而是**两条都独立跑通过**。同时它反过来验证了状态机的仲裁语义（USB 无帧时自动落到 ONLINE_WIFI）。
+
+> 顺带发现一个不影响功能的小问题：设备连上 AP 后日志里会出现一次
+> `w:sta is connected, disconnect before connecting to new ap`——`link_http` 在 `got_ip` 之后又调了一次
+> `esp_wifi_connect()`，属于重复连接调用，功能无影响但可以清理（记在待优化项）。
+
 ### 团队分工（2026-11-10 开工）
 
 | 成员 | 负责 | 写作用域 | 任务 |

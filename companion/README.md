@@ -181,7 +181,16 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WithTray   # 装托盘依�
 | `退出` | 优雅停：停托盘 → 停采集线程 → 停 USB/HTTP → 进程退出 |
 
 不用托盘：`--no-tray` 启动、配置 `tray_enabled: false`，或者不装 `requirements-tray.txt` 都行。
-本机现在没插板子，实测托盘是**黄色（仅 HTTP 在线）**；绿色（串口已打开）要等真机 USB 插上再验。
+
+真机验收（2026-11-10，板子插着 COM10）：绿色 + tooltip（含 `Token ***`）+ 状态弹窗 + 打开配置目录 +
+打开日志 + 菜单退出全部实测通过；黄色用 `--no-usb` 实测（日志 `仅 HTTP 在线（未发现串口）（yellow）`）。
+**拔插 USB 的热切换**需要人工拔一次线：代码路径是「端口消失 → 清空 port_name → 退避重连 → 托盘变黄/回绿」，
+目前只验证了绿/黄两个状态，未做手动拔插。
+
+> **实现坑（已处理）**：pystray 传自定义 `setup` 回调时**不会**自动显示图标，必须在 setup 里
+> `icon.visible = True`，否则日志一切正常但托盘图标永远不出现（真机验收抓到的坑，`tray.py` 已修，
+> 单测 `test_setup_makes_icon_visible` 锁定）。另外 Windows 11 默认把新托盘图标收进
+> 「显示隐藏的图标」浮层，想常显可以把它拖到任务栏上。
 
 ## 排障
 
