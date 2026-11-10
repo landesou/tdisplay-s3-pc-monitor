@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "_source": "docs/design/architecture.md §3 (Link arbitration & data freshness)",
+  "_verified": { "at": "2026-11-10", "tool": "logicprobe_verify", "modelHash": "88fee4edf864", "verdict": "pass_with_findings", "errors": 0, "warnings": 21 },
+  "_extraction_caveats": [
+    "tick = 1 秒节拍；age = 距上一帧的秒数",
+    "INIT 里忽略 usb_frame/wifi_frame/tick 是有意的：外设与 UI 未就绪前收到的帧直接丢弃（日志里有记录）",
+    "boot_done 只可能出现在 INIT，其它状态下同类事件属于事件域外，被忽略",
+    "sleep = 长按 KEY 进入深睡（真实功能），SLEEP 是终态，顺带让运行态 SCC 有出口",
+    "v1 修订：删除 stale-marked（STALE 时 age==3）——schema 规定 init 状态无条件参与 var-in-range，min=3 必然在 init 处违规",
+    "v2 修订：删除 ONLINE 状态的 maxTicks。A14 的驻留计数被 usb_frame 重置 age 但不重置驻留，而设计上「数据一直在流就一直在 ONLINE」是正确行为，驻留时长本来无界；真正的截止期语义是「断流后 3 秒内转 STALE」，由 age 守卫 + age-bound 不变式覆盖",
+    "剩余的 S5/A1 警告都是「该状态下不可能发生的事件被忽略」（boot_done 出现在非 INIT、INIT 期间到帧），属于有意设计；A3 警告是「帧与 tick 的到达顺序会影响结果」，这是物理事实而非缺陷"
+  ],
+  "init": "INIT",
+  "states": [
+    { "id": "INIT", "_note": "app_main 外设/UI 初始化中，尚无任何数据" },
+    { "id": "NO_LINK", "_note": "从未收到过任何一帧，界面显示 OFFLINE" },
+    { "id": "ONLINE_USB", "_note": "USB 帧新鲜，USB 优先于 WiFi" },
+    { "id": "ONLINE_WIFI", "_note": "WiFi HTTP 帧新鲜（USB 无帧时）" },
+    { "id": "STALE", "_note": "曾有数据但超过 3 秒没有新帧，界面标灰" },
+    { "id": "SLEEP", "terminal": true, "_note": "长按 KEY 深睡/断电停机，不再刷新" }
+  ],
+  "transitions": [
+    { "from": "INIT", "event": "boot_done", "to": "NO_LINK", "updates": [{ "variable": "age", "op": "set", "value": 0 }] },
+
+    { "from": "NO_LINK", "event": "usb_frame", "to": "ONLINE_USB", "updates": [{ "variable": "age", "op": "set", "value": 0 }] },
+    { "from": "NO_LINK", "event": "wifi_frame", "to": "ONLINE_WIFI", "updates": [{ "variable": "age", "op": "set", "value": 0 }] },
+    { "from": "NO_LINK", "event": "tick", "to": "NO_LINK" },
+
+    { "from": "ONLINE_USB", "event": "usb_frame", "to": "ONLINE_USB", "updates": [{ "variable": "age", "op": "set", "value": 0 }] },
+    { "from": "ONLINE_USB", "event": "wifi_frame", "to": "ONLINE_USB", "_why": "USB 在线时 WiFi 帧被显式忽略（USB 优先）" },
+    { "from": "ONLINE_USB", "event": "tick", "guard": { "variable": "age", "op": "<", "value": 2 }, "to": "ONLINE_USB", "updates": [{ "variable": "age", "op": "inc" }] },
+    { "from": "ONLINE_USB", "event": "tick", "guard": { "variable": "age", "op": ">=", "value": 2 }, "to": "STALE", "updates": [{ "variable": "age", "op": "set", "value": 3 }] },
+    { "from": "ONLINE_USB", "event": "link_lost", "to": "NO_LINK", "updates": [{ "variable": "age", "op": "set", "value": 0 }] },
+
+    { "from": "ONLINE_WIFI", "event": "wifi_frame", "to": "ONLINE_WIFI", "updates": [{ "variable": "age", "op": "set", "value": 0 }] },
+    { "from": "ONLINE_WIFI", "event": "usb_frame", "to": "ONLINE_USB", "updates": [{ "variable": "age", "op": "set", "value": 0 }] },
+    { "from": "ONLINE_WIFI", "event": "tick", "guard": { "variable": "age", "op": "<", "value": 2 }, "to": "ONLINE_WIFI", "updates": [{ "variable": "age", "op": "inc" }] },
+    { "from": "ONLINE_WIFI", "event": "tick", "guard": { "variable": "age", "op": ">=", "value": 2 }, "to": "STALE", "updates": [{ "variable": "age", "op": "set", "value": 3 }] },
+    { "from": "ONLINE_WIFI", "event": "link_lost", "to": "NO_LINK", "updates": [{ "variable": "age", "op": "set", "value": 0 }] },
+
+    { "from": "STALE", "event": "usb_frame", "to": "ONLINE_USB", "updates": [{ "variable": "age", "op": "set", "value": 0 }] },
+    { "from": "STALE", "event": "wifi_frame", "to": "ONLINE_WIFI", "updates": [{ "variable": "age", "op": "set", "value": 0 }] },
+    { "from": "STALE", "event": "tick", "to": "STALE", "_why": "上位机一直不来数据时保持 STALE，不回退成 ONLINE/NO_LINK" },
+    { "from": "STALE", "event": "link_lost", "to": "NO_LINK", "updates": [{ "variable": "age", "op": "set", "value": 0 }] },
+
+    { "from": "NO_LINK", "event": "sleep", "to": "SLEEP" },
+    { "from": "ONLINE_USB", "event": "sleep", "to": "SLEEP" },
+    { "from": "ONLINE_WIFI", "event": "sleep", "to": "SLEEP" },
+    { "from": "STALE", "event": "sleep", "to": "SLEEP" }
+  ],
+  "variables": [
+    { "name": "age", "kind": "integer", "init": 0, "min": 0, "max": 3 }
+  ],
+  "invariants": [
+    { "id": "age-bound-usb", "description": "ONLINE_USB 状态下 age 不超过 2：绝不把超过 2 秒的数据当在线显示", "kind": "var-in-range", "variable": "age", "min": 0, "max": 2, "when": { "state": "ONLINE_USB" } },
+    { "id": "age-bound-wifi", "description": "ONLINE_WIFI 状态下 age 不超过 2：绝不把超过 2 秒的数据当在线显示", "kind": "var-in-range", "variable": "age", "min": 0, "max": 2, "when": { "state": "ONLINE_WIFI" } },
+    { "id": "usb-frame-first", "description": "任何进入 ONLINE_USB 的路径都必须先收到过 usb_frame（不会凭 WiFi 数据冒充 USB）", "kind": "event-before-state", "event": "usb_frame", "state": "ONLINE_USB" }
+  ],
+  "boundaryChecks": [{ "variable": "age", "values": [0, 1, 2, 3] }],
+  "narrative": {
+    "states": {
+      "INIT": "上电，外设/UI 初始化中，还没有任何数据",
+      "NO_LINK": "从未收到过一帧，界面显示 OFFLINE",
+      "ONLINE_USB": "USB 帧新鲜，USB 优先于 WiFi",
+      "ONLINE_WIFI": "WiFi HTTP 帧新鲜（USB 无帧时使用）",
+      "STALE": "曾有数据，但超过 3 秒没有新帧，界面标灰",
+      "SLEEP": "长按 KEY 深睡，停止刷新（终态）"
+    },
+    "events": {
+      "boot_done": "外设与 UI 初始化完成",
+      "usb_frame": "从 USB CDC 收到一帧合法 JSON",
+      "wifi_frame": "HTTP 轮询成功拿到一帧合法 JSON",
+      "tick": "1 秒节拍，age 增加",
+      "link_lost": "链路显式断开（USB 拔出 / WiFi 掉线）",
+      "sleep": "长按 KEY 进入深睡"
+    },
+    "scenarios": [
+      { "from": "INIT", "event": "boot_done", "scenario": "上电初始化完成后进入 OFFLINE 等待数据" },
+      { "from": "NO_LINK", "event": "usb_frame", "scenario": "插着 USB 时上位机推来第一帧，进入 USB 在线" },
+      { "from": "NO_LINK", "event": "wifi_frame", "scenario": "只有 WiFi 时轮询到第一帧，进入 WiFi 在线" },
+      { "from": "ONLINE_USB", "event": "tick", "scenario": "3 秒内没有新帧就转 STALE，否则 age 加一继续在线" },
+      { "from": "ONLINE_USB", "event": "usb_frame", "scenario": "正常流帧刷新，age 归零" },
+      { "from": "ONLINE_WIFI", "event": "usb_frame", "scenario": "插上 USB 后立刻切到 USB 优先" },
+      { "from": "STALE", "event": "wifi_frame", "scenario": "上位机恢复推送后从 STALE 回到在线" },
+      { "from": "STALE", "event": "link_lost", "scenario": "彻底断线时从 STALE 退回 OFFLINE" },
+      { "from": "ONLINE_USB", "event": "sleep", "scenario": "长按 KEY 直接深睡，停止刷新" }
+    ]
+  }
+}

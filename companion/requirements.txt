@@ -1,0 +1,4 @@
+# pcmond 运行时依赖（Python 3.10+，Windows）
+# 安装：pip install -r requirements.txt
+psutil>=5.9,<8
+pyserial>=3.5,<4

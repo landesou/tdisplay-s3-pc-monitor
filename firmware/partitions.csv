@@ -1,0 +1,7 @@
+# T-Display-S3 (ESP32-S3, 16MB flash) 分区表
+# 用 3MB 的 factory 槽：LVGL 9 + WiFi + 中文字体后会明显超过默认的 1MB
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x300000,
+storage,  data, spiffs,  0x310000, 0x0F0000,

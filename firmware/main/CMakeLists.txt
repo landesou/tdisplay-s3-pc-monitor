@@ -1,0 +1,31 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "config/cfg.c"
+        "display/lcd.c"
+        "display/lvgl_port.c"
+        "ui/ui.c"
+        "ui/ui_pages.c"
+        "link/link.c"
+        "link/link_usb.c"
+        "link/link_http.c"
+    INCLUDE_DIRS
+        "."
+        "config"
+        "display"
+        "ui"
+        "link"
+    PRIV_REQUIRES
+        esp_lcd
+        esp_driver_gpio
+        driver
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_http_client
+        json
+        esp_timer
+        esp_driver_usb_serial_jtag
+    REQUIRES
+        lvgl
+)
