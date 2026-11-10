@@ -20,10 +20,15 @@ rem  mojibake and cmd then executes garbage (we lost a whole evening to this).
 rem =====================================================================
 setlocal
 set "PATH_ORIG=%PATH%"
-set "IDF_ROOT=D:\ESP32-S3\Espressif\frameworks\esp-idf-v5.5.3"
-set "IDF_TOOLS_PATH=D:\ESP32-S3\Espressif"
+rem Paths are overridable by environment variables (handy when the repo is
+rem cloned to another machine). Defaults are this dev box's ESP-IDF install.
+if not defined ESP_IDF_DIR set "ESP_IDF_DIR=D:\ESP32-S3\Espressif\frameworks\esp-idf-v5.5.3"
+if not defined ESP_IDF_TOOLS_DIR set "ESP_IDF_TOOLS_DIR=D:\ESP32-S3\Espressif"
+if not defined ESP_IDF_PYENV set "ESP_IDF_PYENV=%ESP_IDF_TOOLS_DIR%\python_env\idf5.5_py3.11_env"
+set "IDF_ROOT=%ESP_IDF_DIR%"
+set "IDF_TOOLS_PATH=%ESP_IDF_TOOLS_DIR%"
 set "IDF_PATH=%IDF_ROOT%"
-set "PYENV=D:\ESP32-S3\Espressif\python_env\idf5.5_py3.11_env"
+set "PYENV=%ESP_IDF_PYENV%"
 set "PY=%PYENV%\Scripts\python.exe"
 set "TARGET=esp32s3"
 

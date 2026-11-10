@@ -23,3 +23,14 @@ void lcd_backlight_set(uint8_t pct);
  * variant 0..3 对应 4 组候选参数（见 docs/journal.md 待验证项）。
  */
 void lcd_test_pattern(int variant);
+
+/*
+ * 串口标定命令（Lead 批准；落点：fw-link 的串口命令 `lcd` / `lcd N`）。
+ * 这三组参数只能上板实测，所以板子到手后要能不重烧固件就轮换。
+ */
+/** 当前候选参数组号 0..3。 */
+int lcd_test_variant_get(void);
+/** 切到下一组候选参数并立刻重画测试图，返回切换后的组号。 */
+int lcd_test_variant_next(void);
+/** 设定指定组（0..3）并重画测试图。 */
+void lcd_test_variant_set(int variant);

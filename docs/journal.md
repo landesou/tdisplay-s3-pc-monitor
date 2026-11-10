@@ -190,6 +190,31 @@ warmup 再睡 0.25 s 采样），单测锁定了调用顺序。
 
 **未验证（板子不在）**：USB CDC 真机联调（丢帧率、断线重连）、防火墙放行后的设备侧 HTTP 轮询。
 
+### 并行构建隔离 + 仓库初始化（2026-11-10）
+
+- 多人同时改固件时，共用一个 `build/` 会互相踩：实测给 `idf_build.cmd` 加了 `BUILD_DIR` 支持
+  （`-B <绝对路径>` + `-D SDKCONFIG=<绝对路径>/sdkconfig` + `-D IDF_TARGET=esp32s3`）。
+- 坑：第一次写成相对路径，`idf.py` 按**调用者的 cwd** 解析，build 目录跑到仓库根去了，kconfgen 直接失败
+  → 必须传绝对路径（`%PROJ%\%BUILD_DIR%`）。改完实测 `BUILD_DIR=build-lead bash tools/build.sh` 通过，
+  产物在 `firmware/build-lead/`，flash 参数 `--flash_size 16MB --flash_freq 80m` 正确。
+- 现在固件同学各用 `build-display` / `build-link`，互不干扰；都已在 `.gitignore` 里。
+- `git init` + 首个提交 `80d090b`（55 个文件），作为 M0+M1 的可回滚基线。
+
+### M2 对外文档草稿（2026-11-10，Lead 已抽查）
+
+writer 交付两篇（`docs/README.draft.md` 319 行、`docs/blog-draft.md` 222 行 / 约 4200 字），Lead 抽查方式：
+- 规模与「未验证」标注数：README 7 处、博客 4 处；
+- 反编造扫描：`grep` 「fps / 实测 / 点亮 / 烧录成功」只命中 1 处且是真实数据（`nvidia-smi` 实测 GPU 值）；
+- 命令可执行性：README 里 `tools\fetch_deps.cmd`、`bash tools/build.sh`、`bash tools/build.sh flash COM5`、
+  `setup.ps1`/`run.ps1` 与 `tools/`、`companion/` 的实际文件一一对上。
+- 结论：没有发现编造内容，状态警示放在最前面，符合「未点亮必须说明」的要求。
+
+**许可决定：MIT**（与 ESP-IDF 官方示例 CC0、LVGL MIT、参考项目 MIT 兼容）。已建 `LICENSE`（版权署名写
+"T-Display-S3 PC Monitor contributors"，发布前可改成具体 GitHub ID）。
+
+**工具可移植性**：`tools/idf_build.cmd` 里原来硬编码本机 ESP-IDF 路径，已改成可用环境变量覆盖
+（`ESP_IDF_DIR` / `ESP_IDF_TOOLS_DIR` / `ESP_IDF_PYENV`），默认值仍是本机安装位置，克隆到别的机器不用改脚本。
+
 ### 团队分工（2026-11-10 开工）
 
 | 成员 | 负责 | 写作用域 | 任务 |
@@ -197,7 +222,7 @@ warmup 再睡 0.25 s 采样），单测锁定了调用顺序。
 | lead（我） | 架构/契约/journal/骨架/集成/验收 | `docs/`、`firmware/main/main.c`+头文件+CMake 等 | — |
 | pc-companion | Windows 上位机 pcmond | `companion/` | task-1 |
 | fw-display | i80+ST7789 驱动、LVGL 移植、两页 UI | `firmware/main/display/`、`firmware/main/ui/` | task-2 |
-| fw-link | USB/WiFi 双链路 + 状态机 + NVS 配置 | `firmware/main/link/`、`firmware/main/config/` | task-3（待开） |
-| writer | README + 博客草稿 | `docs/README.draft.md`、`docs/blog-draft.md` | task-4（待开） |
+| writer | README + 博客草稿 | `docs/README.draft.md`、`docs/blog-draft.md` | task-3 |
+| fw-link | USB/WiFi 双链路 + 状态机 + NVS 配置 | `firmware/main/link/`、`firmware/main/config/` | task-4 |
 
 
