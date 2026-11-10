@@ -244,8 +244,8 @@ kconfgen 直接失败。根因：`-B` 和 `SDKCONFIG` 都按**调用者的 cwd**
 ## 五、现状与后续
 
 目前能确认的（都在仓库里可复跑）：固件两层全部写完，`bash tools/build.sh` → **0 error / 0 warning**，
-`tdisplay_pcmon.bin` = `0x12ddf0` ≈ 1.18 MB，目标 `xtensa-esp32s3`，16MB 分区布局下 3MB app 槽
-还剩 61%；链路层主机离线测试 **61 checks / 0 failure**；链路状态机模型验证 0 error / 21 warning；
+`tdisplay_pcmon.bin` 约 1.18 MB，当前 3 MB 分区剩余 61%，目标 `xtensa-esp32s3`；
+链路层主机离线测试 **61 checks / 0 failure**；链路状态机模型验证 0 error / 21 warning；
 上位机 65 个单测 2.71 秒跑完，`--once` 输出 424 字节合法帧，里面是 `nvidia-smi` 读出的真实数据
 （RTX 5060，19%，59 °C，2203/8151 MiB，29.7 W）；HTTP 鉴权 200 / 401 / 404 都对，连发两次请求
 `seq` 都是 7，证明 `/api/stats` 不会重复采集。

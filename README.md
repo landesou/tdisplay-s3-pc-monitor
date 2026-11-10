@@ -1,12 +1,3 @@
-<!--
-  草稿说明（发布前删掉这段注释）
-  - 本文件是 GitHub 首页 README 的草稿，链接按「仓库根目录」书写；若直接在 docs/ 下预览，
-    请给相对链接临时加 ../ 前缀。
-  - 事实来源：docs/journal.md、docs/design/architecture.md、docs/bringup.md、firmware/main/board.h、
-    firmware/test/host_link/README.md、companion/README.md、tools/*。
-  - 写这份草稿时屏幕尚未点亮，任何「显示效果/帧率/手感」类描述都没有写，只在「已验证 / 未验证」里如实列出。
--->
-
 # T-Display-S3 PC Monitor
 
 **把一块 1.9 寸的 ESP32-S3 开发板，做成放在桌角的电脑性能仪表盘。**
@@ -100,7 +91,7 @@ T-Display-S3（ESP-IDF 5.5.3 + LVGL 9.2.2）
 ```
 
 两条链路**报文字节相同**，设备侧只在 `src` 字段里标注 `usb` / `wifi`。
-契约细节见 [`docs/design/architecture.md`](design/architecture.md)。
+契约细节见 [`docs/design/architecture.md`](docs/design/architecture.md)。
 
 **为什么不用 AIDA64 / HWiNFO？** AIDA64 是付费软件；HWiNFO 免费版共享内存有时长限制；
 而且现成软件不能同时走 USB 和 HTTP 两种传输。自写采集器一套 JSON、两条链路、零管理员权限。
@@ -173,11 +164,11 @@ bash tools/build.sh flash COM5          # 烧录（端口换成你的）
 BUILD_DIR=build-foo bash tools/build.sh # 独立 build 目录，多人并行时用
 ```
 
-产物：`firmware/build/tdisplay_pcmon.bin` ≈ **1.18 MB**（3 MB app 槽剩 61%）。
+产物：`firmware/build/tdisplay_pcmon.bin` 约 **1.18 MB**，当前 3 MB 分区剩余 61%。
 
 > 为什么要 `bash tools/build.sh` 这一层：Windows 下直接 `cmd //c idf_build.cmd` 会被 MSYS
 > 改写参数，而 msys 的 bash 里直接 export IDF 环境变量会导致 `idf.py` 假报
-> 「python.exe doesn't exist」。细节见 [docs/journal.md](journal.md)。
+> 「python.exe doesn't exist」。细节见 [docs/journal.md](docs/journal.md)。
 
 ### 3) 烧录
 
@@ -300,7 +291,7 @@ tdisplay-s3-pc-monitor/
    于是两个 pcmond 会静默抢 8787，谁也不报错。解法：Windows 上改用 `SO_EXCLUSIVEADDRUSE`，
    第二个实例报 `WinError 10048` 并且只关 HTTP 链路，采集与 USB 继续跑。
 
-完整记录（含每次报错原文、验证命令、结论）在 [`docs/journal.md`](journal.md)。
+完整记录（含每次报错原文、验证命令、结论）在 [`docs/journal.md`](docs/journal.md)。
 
 ---
 
@@ -336,8 +327,8 @@ USB 在线时 Wi-Fi 帧被忽略、SLEEP 终态）、`ONLINE_* 时 age ≤ 2` �
 ### ✅ 已验证（均为非实机）
 
 - **① 固件编译**：`bash tools/build.sh` → **0 error / 0 warning**，
-  `tdisplay_pcmon.bin` = `0x12ddf0`（≈ 1.18 MB / 1,236,464 B），目标 `xtensa-esp32s3`；
-  16 MB 分区布局下 3 MB app 槽剩余 61%（比骨架时大，是 LVGL 全量链接进来了）。
+  `tdisplay_pcmon.bin` 约 1.18 MB，当前 3 MB 分区剩余 61%（比骨架时大，是 LVGL 全量链接进来了）；
+  目标 `xtensa-esp32s3`，16 MB 分区布局。
 - **② 链路层离线测试**：`firmware/test/host_link/run.sh` → **61 checks, 0 failure**
   （状态机全迁移 + `ONLINE_* age ≤ 2` 不变式 + 真实 424 B 帧解析 + 边界与坏 JSON）。
 - **③ 上位机实测**：
@@ -391,9 +382,9 @@ USB 在线时 Wi-Fi 帧被忽略、SLEEP 终态）、`ONLINE_* 时 age ≤ 2` �
 
 ## 文档
 
-- 架构与接口契约：[docs/design/architecture.md](design/architecture.md)
+- 架构与接口契约：[docs/design/architecture.md](docs/design/architecture.md)
 - 上板点亮、黑屏排查、4 组参数标定与联调清单：[docs/bringup.md](docs/bringup.md)
-- 状态机模型：[docs/design/link-state-machine.model.json](design/link-state-machine.model.json)
-- 开发日志（过程事实源）：[docs/journal.md](journal.md)
-- 技术长文草稿：[docs/blog-draft.md](blog-draft.md)
+- 状态机模型：[docs/design/link-state-machine.model.json](docs/design/link-state-machine.model.json)
+- 开发日志（过程事实源）：[docs/journal.md](docs/journal.md)
+- 技术长文草稿：[docs/blog-draft.md](docs/blog-draft.md)
 - 上位机说明：[companion/README.md](companion/README.md)

@@ -293,6 +293,31 @@ fw-display 交付：`lcd.c`(459 行) / `lvgl_port.c`(203) / `ui.c`(485) / `ui_pa
 
 **仍未实机验证**：屏幕能否点亮、4 组 ST7789 参数哪组对、i80 时序/DC 电平、颜色位序、按键手感、实际帧率。
 
+### M4 发布准备：README 合并入根目录（2026-11-10）
+
+- `docs/README.draft.md` 合并成仓库根 **`README.md`**（391 行），合并时做了三件事：
+  1. 删掉草稿头的说明注释；
+  2. **修正相对链接**——草稿是按 `docs/` 目录写的，搬到根目录后 `journal.md` / `design/*.md` /
+     `blog-draft.md` 这些链接全断，统一加 `docs/` 前缀；用脚本逐个校验 8 个相对链接全部命中（0 个 MISS）；
+  3. 删掉合并后的草稿文件，避免仓库里两份 README 打架（历史留在 git 里）。
+- 精确字节数（`0x12ddf0` / `1,236,4xx`）全部改成「约 1.18 MB / 当前 3 MB 分区剩 61%」——
+  固件每次改代码 bin 都会变几十~几百字节，写死 byte 数一定会过期，这是个容易犯的文档病。
+- 待用户提供后替换：`README.md` 与 `docs/blog-draft.md` 里的 GitHub 仓库地址（现在还是
+  `https://github.com/<your-id>/tdisplay-s3-pc-monitor` 占位）。
+
+### 全仓验收（2026-11-10，Lead 自己跑的最后一轮）
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| 固件编译 | `bash tools/build.sh` | 0 error / 0 warning，`tdisplay_pcmon.bin` 约 1.18 MB，3 MB 分区剩 61% |
+| 固件离线行为测试 | `GCC=<mingw> bash firmware/test/host_link/run.sh` | **61 checks, 0 failure** |
+| 上位机单测 | `python -m pytest companion -q` | **65 passed** |
+| 上位机接口 | `curl` + token | 200 / 401 / 404 / seq 不重复采集，全部通过 |
+
+**这个项目现在的真实状态**：代码链路是完整闭环，但**屏幕一次都没亮过**（用户还没把板子插上电脑）。
+所有跟画面有关的参数（ST7789 offset/mirror/invert/RGB、i80 时序、20 MHz 稳不稳）都是"照官方示例 +
+静态推演"，必须上板标定。`docs/bringup.md` 就是为那一刻准备的手册。
+
 ### 团队分工（2026-11-10 开工）
 
 | 成员 | 负责 | 写作用域 | 任务 |
