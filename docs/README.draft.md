@@ -2,7 +2,8 @@
   草稿说明（发布前删掉这段注释）
   - 本文件是 GitHub 首页 README 的草稿，链接按「仓库根目录」书写；若直接在 docs/ 下预览，
     请给相对链接临时加 ../ 前缀。
-  - 事实来源：docs/journal.md、docs/design/architecture.md、firmware/main/board.h、companion/README.md、tools/*。
+  - 事实来源：docs/journal.md、docs/design/architecture.md、docs/bringup.md、firmware/main/board.h、
+    firmware/test/host_link/README.md、companion/README.md、tools/*。
   - 写这份草稿时屏幕尚未点亮，任何「显示效果/帧率/手感」类描述都没有写，只在「已验证 / 未验证」里如实列出。
 -->
 
@@ -15,14 +16,15 @@
 > A Python host daemon (`pcmond`) samples CPU / RAM / GPU / network / disk every
 > second and pushes one compact JSON line over **USB CDC** (HTTP + Wi-Fi as
 > fallback). Firmware: ESP-IDF 5.5.3 + LVGL 9.2.2. Host: Python 3.10+. **License: MIT.**
-> **Status:** firmware builds, link state machine is model-verified (0 errors),
-> host passes 65 unit tests — **the panel has not been lit yet**, see
+> **Status:** firmware builds clean (0 error / 0 warning) and the link layer passes
+> 61 host-side checks; the state machine is model-verified (0 errors); host passes
+> 65 unit tests — **the panel has not been lit yet**, see
 > [Verified / Unverified](#已验证--未验证).
 
 > ⚠️ **项目状态（2026-11-10）**：屏幕还没点亮——写这份文档时板子没插在电脑上
-> （系统里查不到 `VID_303A` 设备）。目前已验证的是：**固件编译通过**、
-> **链路状态机通过模型验证（0 error）**、**上位机 65 个单测通过并读出真实 GPU 数据**。
-> 所有与「屏幕」相关的描述都是设计目标，不是实机结果。请以文末两张清单为准。
+> （系统里查不到 `VID_303A` 设备）。固件两层已写完并**编译通过（0 error / 0 warning）**，
+> 链路层另有 **61 条主机离线测试**通过；状态机通过模型验证（0 error）；上位机 65 个单测通过
+> 并读出真实 GPU 数据。**以上都不是实机验证**，请以文末两张清单为准。
 
 ---
 
@@ -73,7 +75,9 @@ PAGE 1/2                                       uptime 3d 04h
 
 引脚定义集中在 [`firmware/main/board.h`](firmware/main/board.h)。
 
-按键行为、屏参数（offset / mirror / invert / RGB 顺序）**尚未在实机上确认**——见文末清单。
+按键行为、屏参数（swap_xy / mirror / invert / RGB-BGR / gap）**尚未在实机上确认**：
+固件预置了 4 组候选参数，点亮当天靠测试图案肉眼判断哪组对，方法见
+[`docs/bringup.md`](docs/bringup.md)。
 
 ---
 
@@ -100,6 +104,36 @@ T-Display-S3（ESP-IDF 5.5.3 + LVGL 9.2.2）
 
 **为什么不用 AIDA64 / HWiNFO？** AIDA64 是付费软件；HWiNFO 免费版共享内存有时长限制；
 而且现成软件不能同时走 USB 和 HTTP 两种传输。自写采集器一套 JSON、两条链路、零管理员权限。
+
+---
+
+## 固件实现要点（编译级，未实机验证）
+
+display/ui + link/config 两层都写完了，下面是上板前值得先知道的实现选择：
+
+- **上电顺序**：`LCD_POWER_ON`(GPIO15) 拉高 → 背光 LEDC 先设 `duty=0` →
+  i80 总线（8-bit，D0–D7 = 39/40/41/42/45/46/47/48，WR=8，20 MHz，`dma_burst=64`）→
+  ST7789 panel（RST=5）→ MADCTL + gap + invert → 最后开背光。
+- **旋转**：不走 `esp_lcd_panel_mirror` / `swap_xy`，改成初始化后**一次写 MADCTL(0x36)**——
+  BGR 位没有对应的 driver setter，而且重建 panel 会让 LVGL 缓存的 handle 悬空。
+  gap / invert 仍走 driver API。
+- **显存预算**：两块 `esp_lcd_i80_alloc_draw_buffer(320*40*2)` = **51.2 KB 内部 RAM**，不开 PSRAM；
+  LVGL 堆 64 KB 是静态 bss。启动后内部堆 ≈153 KB，扣掉 draw buffer 余 ≈102 KB 给 Wi-Fi / HTTP / USB；
+  不够时把 `LCD_DRAW_BUF_LINES` 从 40 降到 24（一处改）。
+- **USB 收数据必须装驱动**：USB-Serial/JTAG 的 RX FIFO 只有 **64 B**，而一帧 JSON 是 ~424 B 的突发写入，
+  读 console 的 stdin 会丢字节。正确姿势是 `usb_serial_jtag_driver_install()` →
+  `usb_serial_jtag_vfs_register()` → `usb_serial_jtag_vfs_use_driver()`，
+  让 esp_log 的 TX 和 JSON 行共用同一把锁，日志才不会把数据行切碎。
+- **仲裁**：USB 在线时 Wi-Fi 帧**显式忽略**（seq / age 都不动），HTTP 轮询整轮跳过；
+  这样状态灯不会在数据其实来自 Wi-Fi 时长亮 USB。
+- **标定模式**：长按 BOOT 2 秒进/出，标定中短按 BOOT 切下一组候选；串口 `lcd` / `lcd 2` 等效。
+  4 组候选：V0（MV+MX+invert+RGB+gap(0,35)，MV/MX 为镜像方向）/ V1（换镜像轴）/ V2（关 invert+BGR）/
+  V3（无镜像，gap(0,0)）。**哪组对还没实机确认**，判读标准见 [`docs/bringup.md`](docs/bringup.md)。
+- **UI 布局**：P0 = 顶栏（主机名 / 时钟 / 状态点）+ CPU / GPU / MEM / NET 卡片 + 60 点曲线；
+  P1 = 24 根线程柱（11 px 柱宽）+ 两行明细（DISK R/W、VRAM、温度、开机时长、FPS）。
+  顶栏放在页面容器外、两页共享，所以 P1 也能看到 STALE。
+- **串口命令**：`cfg` / `wifi <ssid> <pass>` / `url <url>` / `token <tok>` / `lcd [0-3]` /
+  `reboot` / `help`。
 
 ---
 
@@ -138,6 +172,8 @@ bash tools/build.sh menuconfig
 bash tools/build.sh flash COM5          # 烧录（端口换成你的）
 BUILD_DIR=build-foo bash tools/build.sh # 独立 build 目录，多人并行时用
 ```
+
+产物：`firmware/build/tdisplay_pcmon.bin` ≈ **1.18 MB**（3 MB app 槽剩 61%）。
 
 > 为什么要 `bash tools/build.sh` 这一层：Windows 下直接 `cmd //c idf_build.cmd` 会被 MSYS
 > 改写参数，而 msys 的 bash 里直接 export IDF 环境变量会导致 `idf.py` 假报
@@ -178,6 +214,10 @@ powershell -ExecutionPolicy Bypass -File .\uninstall_startup.ps1
 `wifi <ssid> <pass>` / `url <url>` / `token <tok>` / `cfg` / `reboot` 手动配。
 更多参数与排障见 [`companion/README.md`](companion/README.md)。
 
+> **板子到手后**：按 [`docs/bringup.md`](docs/bringup.md) 走一遍——认设备 → 构建烧录 →
+> 第一次点亮/黑屏排查表 → 4 组参数标定 → 上位机与 Wi-Fi 联调 → 结果回填 journal。
+> 这份清单是「板子到手当天照着做」的操作手册，屏幕相关步骤本身尚未执行过。
+
 ---
 
 ## 监控指标
@@ -217,6 +257,7 @@ tdisplay-s3-pc-monitor/
 │   │   ├── config/            # NVS 配置
 │   │   └── stats.h            # 帧结构（契约 §2 的 C 侧）
 │   ├── components/lvgl/       # fetch_deps.cmd 生成，gitignore
+│   ├── test/host_link/        # 链路层主机离线测试（真实 link.c 编到 PC 上跑）
 │   ├── partitions.csv         # 16 MB 分区：nvs 24K / phy 4K / factory 3 MB / storage 1 MB
 │   └── sdkconfig.defaults
 ├── companion/                 # Windows 上位机 pcmond（Python，依赖只有 psutil + pyserial）
@@ -227,6 +268,7 @@ tdisplay-s3-pc-monitor/
 ├── tools/                     # 构建包装（build.sh → idf_build.cmd）、依赖拉取
 └── docs/
     ├── journal.md             # 开发日志（过程事实源）
+    ├── bringup.md             # 上板点亮/标定/联调清单（板子到手后照着做）
     ├── design/architecture.md # 架构与接口契约
     ├── design/link-state-machine.model.json  # 状态机模型（logicprobe 验证用）
     ├── README.draft.md        # 本文件
@@ -262,41 +304,70 @@ tdisplay-s3-pc-monitor/
 
 ---
 
+## 没有板子也能验证固件：host_link 离线测试
+
+链路层的新鲜度状态机和「帧 JSON → `stats_t`」解析都是纯 C 逻辑，不碰 GPIO / LCD / Wi-Fi，
+所以可以**把固件里真实的 `link.c` 直接编到 PC 上跑**。`firmware/test/host_link/` 用 MinGW +
+FreeRTOS / esp_log / esp_err 的 shim + ESP-IDF 自带 cJSON 做这件事——编的是
+`firmware/main/link/link.c` 本体，不是复制品：
+
+```bash
+# Windows：MinGW 不在 PATH 时显式指定（也可以用 scoop/MSYS2 装一个）
+GCC=/path/to/mingw64/bin/gcc.exe bash firmware/test/host_link/run.sh
+# Linux / macOS：有 gcc 或 clang 就行
+bash firmware/test/host_link/run.sh
+```
+
+结果：**61 checks, 0 failure**，覆盖状态机全部迁移（INIT 丢帧、USB 抢占、3 个 tick 转 STALE、
+USB 在线时 Wi-Fi 帧被忽略、SLEEP 终态）、`ONLINE_* 时 age ≤ 2` 不变式、`frame.json` 里 424 B 的
+真实上位机帧解析、40 核截断到 32、占用率越界夹取、坏 JSON 拒收。找不到编译器时脚本只打印提示并
+`exit 2`，不猜路径、不静默跳过。
+
+> 它不代表实机验证：跑的是 x86 代码，没碰 USB / Wi-Fi / NVS / 串口 / 深睡；
+> `xSemaphore` 在 shim 里是空实现，真实 RTOS 下的竞态和栈溢出测不到。模型验证回答「设计对不对」，
+> 这个测试回答「代码是不是真的那么走」。
+
+---
+
 ## 已验证 / 未验证
 
 诚实起见，这里按 journal 记的验收结果逐项列出。**写这份文档时屏还没亮。**
 
-### ✅ 已验证
+### ✅ 已验证（均为非实机）
 
-- **固件能编译**：`firmware/build/tdisplay_pcmon.bin` = 195,264 B（≈ 195 KB），
-  目标 `xtensa-esp32s3`（不是默认 esp32）；16 MB 分区布局下 3 MB app 槽剩余 94%。
-- **并行构建隔离**：`BUILD_DIR=build-lead bash tools/build.sh` 通过，产物在 `firmware/build-lead/`，
-  flash 参数 `--flash_size 16MB --flash_freq 80m` 正确（多人同时改固件互不干扰）。
-- **链路状态机过模型验证**：`logicprobe_verify` 三轮迭代后
-  `verdict = pass_with_findings`，**0 error / 21 warning**，
-  模型 hash `88fee4edf864`，模型在 `docs/design/link-state-machine.model.json`。
-  3 秒断流转 `STALE`、`ONLINE_*` 时 `age ≤ 2` 等硬要求都有不变式覆盖。
-- **上位机 65 个单测通过**：`python -m pytest companion -q` → `65 passed in 2.71s`。
-- **上位机单帧真实数据**：`python -m pcmond --once` 输出 409 B 合法帧
-  （契约上限 600 B），GPU 字段是 `nvidia-smi` 实测值（RTX 5060 / 19% / 59 °C / 2203 MiB / 29.7 W）。
-- **HTTP 链路**：`GET /api/stats` 带 Token → 200；无 Token / 错 Token → 401；`/health` → 200；
-  `/xyz` → 404；连发两次请求 `seq` 都是 7 → 证明 `/api/stats` 只回最新快照、不重复采集。
-- **采集/传输解耦**：采集线程固定周期产帧，队列满丢最旧帧，采集永不阻塞；USB 拔掉指数退避重连。
-- **运行环境**：ESP-IDF 5.5.3、Python 3.12.13、psutil 7.2.2、pyserial 3.5、pytest 9.2.0、Windows 11 10.0.26100。
+- **① 固件编译**：`bash tools/build.sh` → **0 error / 0 warning**，
+  `tdisplay_pcmon.bin` = `0x12ddf0`（≈ 1.18 MB / 1,236,464 B），目标 `xtensa-esp32s3`；
+  16 MB 分区布局下 3 MB app 槽剩余 61%（比骨架时大，是 LVGL 全量链接进来了）。
+- **② 链路层离线测试**：`firmware/test/host_link/run.sh` → **61 checks, 0 failure**
+  （状态机全迁移 + `ONLINE_* age ≤ 2` 不变式 + 真实 424 B 帧解析 + 边界与坏 JSON）。
+- **③ 上位机实测**：
+  - 65 个单测：`python -m pytest companion -q` → `65 passed in 2.71s`。
+  - 单帧数据：`python -m pcmond --once` 输出 424 B 合法帧（契约上限 600 B；`host` 正好 15 字符
+    卡满、`gpu.name` 34 字符被截到 19），GPU 字段是 `nvidia-smi` 实测值
+    （RTX 5060 / 19% / 59 °C / 2203 MiB / 29.7 W）。
+  - HTTP：`GET /api/stats` 带 Token → 200；无 Token / 错 Token → 401；`/health` → 200；
+    `/xyz` → 404；连发两次请求 `seq` 都是 7 → `/api/stats` 只回最新快照、不重复采集。
+  - 采集/传输解耦：采集线程固定周期产帧，队列满丢最旧帧，采集永不阻塞；USB 拔掉指数退避重连。
+
+- **附：其它非实机验证**：链路状态机 `logicprobe_verify` 三轮迭代后
+  `verdict = pass_with_findings`，**0 error / 21 warning**，模型 hash `88fee4edf864`，
+  模型在 `docs/design/link-state-machine.model.json`；`BUILD_DIR=build-lead bash tools/build.sh`
+  通过、flash 参数 `--flash_size 16MB --flash_freq 80m` 正确；
+  环境：ESP-IDF 5.5.3、Python 3.12.13、psutil 7.2.2、pyserial 3.5、pytest 9.2.0、Windows 11 10.0.26100。
 
 ### ⚠️ 未验证
 
-- **屏幕点亮、显示方向 / offset / mirror / invert / RGB-BGR、颜色、刷新率、观感、按键手感**——
-  全都没有（板子未插在电脑上，系统里无 `VID_303A` 设备）。这些要等实机测试图案四步试参数。
+- **屏幕能否点亮、4 组 ST7789 参数哪组对、i80 时序（PCLK / DC 电平）、颜色位序、观感、按键手感、
+  实际帧率**——全都没有（板子未插在电脑上，系统里无 `VID_303A` 设备）。
+  判读方法见 [`docs/bringup.md`](docs/bringup.md)，点亮后要把结果回填 journal。
 - **烧录流程**：`bash tools/build.sh flash COM5` 尚未在实机执行过。
-- **USB CDC 真机联调**：1 Hz、约 300–600 B/帧下的丢帧率、断线重连、`hello` → `cfg` 握手，
-  目前只有单测 + 假串口验证。
-- **Wi-Fi / HTTP 设备端轮询**：Windows 防火墙放行后设备能否稳定轮询，未在局域网设备上验证；
+- **USB 真机收帧与 `hello` → `cfg` 往返**：1–2 Hz、424 B/帧的实际收帧、丢帧率、断线重连、
+  cfg 写 NVS 都未联调，目前只有单测 + 主机离线测试 + 假串口验证。
+- **Wi-Fi 连接与 HTTP 轮询**：设备能否连上、防火墙放行后能否稳定轮询，未在局域网设备上验证；
   按计划 v1 先把 USB 链路跑通，Wi-Fi 双模随后（HTTP 链路已在架构里定义）。
+- **NVS 持久化、串口命令、深睡**：代码已写，未上板验证。
 - **CPU 温度**：Intel 14 代 HX 需要 MSR/内核驱动，v1 不承诺（`cpu.temp` 本机为 `null`）。
 - **板子丝印 `H569` 对应的具体版本**：公开资料没能核实，按标准 T-Display-S3 处理。
-- **固件 display / ui / link 模块的实机行为**：journal 记录的验收只覆盖「编译通过 + 状态机建模 +
-  上位机」，显示与链路的真机行为（渲染、轮询、重连）不在已验证范围内。
 - **非本机环境**：上位机只在本机（conda Python 3.12.13）验证过；其它 Python 3.10+ 环境、
   其它 ESP-IDF 安装路径未验证。
 
@@ -321,6 +392,7 @@ tdisplay-s3-pc-monitor/
 ## 文档
 
 - 架构与接口契约：[docs/design/architecture.md](design/architecture.md)
+- 上板点亮、黑屏排查、4 组参数标定与联调清单：[docs/bringup.md](docs/bringup.md)
 - 状态机模型：[docs/design/link-state-machine.model.json](design/link-state-machine.model.json)
 - 开发日志（过程事实源）：[docs/journal.md](journal.md)
 - 技术长文草稿：[docs/blog-draft.md](blog-draft.md)

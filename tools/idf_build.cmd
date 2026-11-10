@@ -41,8 +41,15 @@ if not exist "%IDF_ROOT%\tools\idf.py" (
     exit /b 2
 )
 
-"%PY%" "%IDF_ROOT%\tools\idf_tools.py" export --format key-value > "%TEMP%\idfenv_build.txt" 2>nul
-for /f "usebackq delims=" %%L in ("%TEMP%\idfenv_build.txt") do set "%%L"
+rem Take the IDF tool environment (cmake/ninja/toolchain/IDF_PYTHON_ENV_PATH ...).
+rem NOTE: per-process temp file. Two parallel builds (two agents at once) used to
+rem race on one shared file and get a truncated env, which surfaced as the bogus
+rem "cmake must be available on the PATH" error.
+if not defined TEMP set "TEMP=%TMP%"
+set "IDF_ENV_TMP=%TEMP%\idfenv_build_%RANDOM%%RANDOM%%RANDOM%.txt"
+"%PY%" "%IDF_ROOT%\tools\idf_tools.py" export --format key-value > "%IDF_ENV_TMP%" 2>nul
+for /f "usebackq delims=" %%L in ("%IDF_ENV_TMP%") do set "%%L"
+del /q "%IDF_ENV_TMP%" 2>nul
 set "PATH=%PATH%;%PATH_ORIG%"
 
 set "PROJ=%~dp0..\firmware"

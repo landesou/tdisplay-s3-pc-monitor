@@ -256,6 +256,43 @@ fw-link 交付 `link.c`(369) / `link_usb.c`(316) / `link_http.c`(240) / `cfg.c`(
 - 新增 `docs/bringup.md`：上板点亮/黑屏排查表/4 组参数标定判断标准/上位机联调/WiFi 联调/结果回填要求。
   这份是「板子到手当天照着做」的操作手册，**里面屏幕相关步骤本身尚未执行过**。
 
+### M3 显示层完成 + 一次真实的集成 bug（2026-11-10）
+
+fw-display 交付：`lcd.c`(459 行) / `lvgl_port.c`(203) / `ui.c`(485) / `ui_pages.c`(163)，
+`bash tools/build.sh` → **0 error 0 warning，bin `0x12ddf0` ≈ 1.18 MB，3 MB 分区剩 61%**
+（比骨架的 195 KB 大，是因为 LVGL 全量链接进来了）。
+
+**它抓到我写的一个真 bug（值得记下来，因为这类"跨模块状态没同步"最容易漏）**：
+- 现象（静态推演，未上板）：BOOT 长按退出标定模式后，屏幕一直停在测试图，UI 回不来。
+- 根因：测试图是**绕过 LVGL 直接写面板**的，所以 `ui_update()` 里加了
+  `if (lcd_test_pattern_active()) return;` 防止 UI 把测试图盖掉；而我 main.c 的退出分支只置了
+  `s_force_repaint = true`，没清 lcd 的测试模式标志 → `ui_update()` 早退，`s_force_repaint` 被消费掉，屏就卡在测试图。
+- 修法（两处一起）：
+  1. `ui.h` 新增 `ui_exit_test_mode()`（清标志 + `lv_obj_invalidate(lv_screen_active())` + 置 `s_force_full_update`），
+     因为测试图不是 LVGL 画的，不整屏 invalidate 就只有后续变化的 label 重绘、其余还留着测试图；
+  2. main.c 退出分支改成在 `lvgl_lock()` 里调 `ui_exit_test_mode()`。
+- **第二层问题**：修完发现「标定模式」有两个状态源（main 的 `s_lcd_test_mode` + lcd.c 的 `s_test_active`），
+  从串口 `lcd` 进标定后 BOOT 开关会错乱（以为要"进入"其实已在里面）。Lead 进一步改成**单一状态源**：
+  main.c 直接 `lcd_test_pattern_active()` 判状态，删掉自己的布尔量；BOOT 长按 = 反向切换，BOOT 短按 = 标定中就切参数、否则切亮度。
+  `app_task` 里跳过 UI 刷新的判断也改用同一个函数。
+
+**其它技术事实（fw-display 实测/查证）**：
+- **旋转不用 `esp_lcd_panel_mirror/swap_xy`，改为一次写 MADCTL(0x36)**：BGR 位没有 driver setter，
+  且重建 panel 会让 LVGL 缓存的 handle 悬空。gap/invert 仍走 driver API。
+- **draw buffer 两块 `esp_lcd_i80_alloc_draw_buffer(320*40*2)` = 51.2 KB 内部 RAM**（`INTERNAL|DMA` 拿对齐），
+  不开 PSRAM；LVGL 堆 64 KB 是静态 bss。启动后内部堆 ≈153 KB，扣掉 buffer 剩 **≈102 KB 给 WiFi/HTTP/USB**。
+  判断：纯 HTTP 不开 TLS 时 lwIP+WiFi STA 峰值约 60–70 KB，够用；**若实机报 heap 不足，把 `LCD_DRAW_BUF_LINES` 从 40 降到 24 即可**（一处改）。
+- **i80 驱动内部没有跨任务互斥**（查了 `esp_lcd_panel_io_i80.c`，只有自旋锁保护 bus 成员）→ 所以 main.c 里
+  所有 `lcd_test_pattern*` 调用都包在 `lvgl_lock()` 里；fw-display 在测试图函数内部另有"置标志 → 等 100 ms"兜底。
+- **Montserrat 字体没有 ↓↑ 字形**（查了 vendored 字体的 unicode_list，0x2193/0x2191 不在；0xB0「°」在）→
+  NET 卡用 ASCII `DN x.x  UP x.x MB/s`。
+- 布局修正：原设计顶栏 20 + 右列 48/40/76 = 184 > 170 放不下 → 右列压成 **42/34/66**（MEM 百分比仍用 Montserrat 20）；
+  P1 的 24 根柱 12px+2px = 334 > 320 → 改 **11px 柱宽**（总 310）。
+- 曲线按 `pc_time` 的秒桶推进（上位机 1–2 Hz，按帧推会变成 2 点/秒，60 点窗口缩成 30 s）；STALE 时不推点。
+- 顶栏移到页面容器**外**，两页共享，保证 P1 也能看到 STALE 状态。
+
+**仍未实机验证**：屏幕能否点亮、4 组 ST7789 参数哪组对、i80 时序/DC 电平、颜色位序、按键手感、实际帧率。
+
 ### 团队分工（2026-11-10 开工）
 
 | 成员 | 负责 | 写作用域 | 任务 |

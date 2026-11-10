@@ -23,4 +23,13 @@ void ui_update(const stats_t *s, link_state_t st, uint32_t age_s);
 /** 切换到下一页。 */
 void ui_next_page(void);
 
+/**
+ * 退出 bring-up 标定图模式：把屏幕交还 UI 并整屏重绘。
+ * 为什么需要：测试图是绕过 LVGL 直接写面板的，LVGL 并不知道屏上已经变了；
+ * 光把「测试模式」标志清掉不够，必须整屏 invalidate，否则只有变化的 label 重绘、
+ * 其余区域还留着测试图。
+ * 调用方（main.c 的 BOOT 长按退出分支）必须持 lvgl_lock()。
+ */
+void ui_exit_test_mode(void);
+
 uint8_t ui_page(void);

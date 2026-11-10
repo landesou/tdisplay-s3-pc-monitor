@@ -69,6 +69,9 @@ static uint32_t s_last_chart_time;
 static bool     s_chart_have;
 static bool     s_last_stale = false; /* 初值特意与「无数据时 stale=true」相反，保证首帧必刷 */
 static bool     s_last_have;
+/* 从 bring-up 测试图模式回来时置位：下一次 ui_update 必须走完整刷新，
+ * 不能被下面「值没变就跳过」的缓存优化挡掉。 */
+static bool     s_force_full_update;
 
 /* =====================================================================
  * 小工具
@@ -409,13 +412,17 @@ void ui_update(const stats_t *s, link_state_t st, uint32_t age_s)
     clock_update(have ? s->pc_time : 0, stale);
     status_update(st, age_s, stale);
 
-    /* 只有「新帧 / 有无数据变化 / 新鲜度变化」才重写数值区 */
-    bool changed = (have != s_last_have) ||
+    /* 只有「新帧 / 有无数据变化 / 新鲜度变化」才重写数值区。
+     * s_force_full_update：刚退出标定图模式时强制走一次完整刷新 —— 测试图期间
+     * ui_update 一直是早退的，缓存里的 seq/新鲜度可能已经和屏上状态对不上。 */
+    bool changed = s_force_full_update ||
+                   (have != s_last_have) ||
                    (have && (!s_have_seq || s->seq != s_last_seq)) ||
                    (stale != s_last_stale);
     if (!changed) {
         return;
     }
+    s_force_full_update = false;
     s_last_have = have;
     s_last_stale = stale;
     if (have) {
@@ -462,18 +469,33 @@ void ui_update(const stats_t *s, link_state_t st, uint32_t age_s)
     }
 }
 
+void ui_exit_test_mode(void)
+{
+    if (!s_ready) {
+        return;
+    }
+    /* 三件事缺一不可：
+     * 1) 清「测试图模式」标志，让 ui_update 重新接管；
+     * 2) 整屏 invalidate —— 测试图是绕过 LVGL 直接写面板的像素，LVGL 仍以为
+     *    屏上是它画的内容，不整屏失效的话只有后续变化的 label 会重绘，其余
+     *    区域还留着测试图；
+     * 3) 强制下一次 ui_update 走完整刷新（见 s_force_full_update）。 */
+    lcd_test_pattern_stop();
+    lv_obj_invalidate(lv_screen_active());
+    s_force_full_update = true;
+    ESP_LOGI(TAG, "test-pattern mode exited, UI takes over");
+}
+
 void ui_next_page(void)
 {
     if (!s_ready) {
         return;
     }
-    /* KEY 短按 = 退出 bring-up 测试图模式并翻页（测试图模式下屏幕被标定图案占用） */
+    /* KEY 短按 = 退出 bring-up 测试图模式并翻页（测试图模式下屏幕被标定图案占用）。
+     * 与 BOOT 长按退出（main.c 调 ui_exit_test_mode）走同一套逻辑，保证两条
+     * 退出路径行为一致：清标志 + 整屏 invalidate + 强制全刷。 */
     if (lcd_test_pattern_active()) {
-        lcd_test_pattern_stop();
-        ESP_LOGI(TAG, "leave test-pattern mode");
-        /* 测试图是绕过 LVGL 直接写面板的像素，LVGL 并不知道屏上已经变了。
-         * 不整屏失效的话，退出后只有后续变化的 label 会重绘，其余仍是测试图。 */
-        lv_obj_invalidate(lv_screen_active());
+        ui_exit_test_mode();
     }
     s_page = (uint8_t)((s_page + 1u) % 2u);
     apply_page();

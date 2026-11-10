@@ -1,7 +1,8 @@
 # 一块吃灰的 1.9 寸屏，怎么变成电脑性能仪表盘
 
 > 状态说明：这是边做边写的记录。写它的时候屏幕还没点亮（板子没插电脑），
-> 所以「编译通过」「上位机 65 个单测通过」「状态机模型验证 0 error」都是真跑过的；
+> 所以「固件全部编译通过（0 error / 0 warning）」「链路层 61 条主机离线测试通过」
+> 「上位机 65 个单测通过」「状态机模型验证 0 error」都是真跑过的；
 > 「点亮后画面如何」「实测帧率多少」这类没发生的事不会写，追溯不到的地方标 **未验证**。
 
 ## 一、起因：一块吃灰的屏
@@ -50,7 +51,7 @@ GPU 温度、显存和功耗。切任务管理器太慢，开一个悬浮窗又�
 
 这一步的时间花得值得：先分清哪些能搬、哪些不能搬，后面就不会在别人的驱动代码里绕圈子。
 
-## 三、四个关键技术点
+## 三、五个关键技术点
 
 ### 3.1 这屏根本不是 SPI 的
 
@@ -65,9 +66,16 @@ RST 在 GPIO5，背光在 GPIO38，像素时钟 20MHz。另外还有一个必须
 LVGL 9.2.2 移植代码、`esp_lcd_i80_alloc_draw_buffer` 双缓冲，连 flush 回调里的 RGB565
 字节交换都写好了。这基本就是为本项目准备的地基，省掉从零啃 8080 时序的成本。
 
-另一个决定：**v1 不启用 PSRAM**。8MB PSRAM 看着香，但 170×320 的双缓冲用内部 RAM
-（2×34KB）就够，而 PSRAM 的 octal/quad 模式一旦配错，是「开机直接失败」级别的风险。
-先把能跑的路径跑通，再谈优化。
+**旋转是在初始化后一次写 MADCTL(0x36) 解决的**，没走 `esp_lcd_panel_mirror` / `swap_xy`：
+BGR 位没有对应的 driver setter，而且重建 panel 会让 LVGL 缓存的 handle 悬空。
+gap 和 invert 仍走 driver API。
+
+另一个决定：**v1 不启用 PSRAM**，显存预算算得很紧：两块
+`esp_lcd_i80_alloc_draw_buffer(320*40*2)` = **51.2 KB 内部 RAM**（`INTERNAL|DMA` 拿对齐），
+LVGL 堆 64 KB 是静态 bss。启动后内部堆 ≈153 KB，扣掉 draw buffer 剩 **≈102 KB 给 WiFi / HTTP / USB**
+——纯 HTTP 不开 TLS 时 lwIP + WiFi STA 峰值约 60–70 KB，够用；真报 heap 不足就把
+`LCD_DRAW_BUF_LINES` 从 40 降到 24（一处改）。而 PSRAM 的 octal/quad 模式一旦配错，
+是「开机直接失败」级别的风险，能不用就不用。
 
 ### 3.2 LVGL 9：不走组件管理器，把源码 vendor 进来
 
@@ -94,8 +102,8 @@ ESP32-S3 有原生 USB-Serial/JTAG（D-/D+ = GPIO19/20），板上没有外置�
 对桌面摆件来说这是最舒服的形态——不用配网、不用开什么软件，插上就有数。
 
 协议上做了个反直觉但很实用的选择：**不上二进制协议，就发一行 JSON**。每帧一行、`\n` 结尾、
-UTF-8 无 BOM，契约上限 600 字节，实测一帧 409 字节（24 线程时 `cores` 数组占大头），
-字段全部可选，缺了就显示 `--`：
+UTF-8 无 BOM，契约上限 600 字节，实测一帧 **424 字节**（`host` 正好 15 字符卡满、`gpu.name`
+34 字符被截到 19），字段全部可选，缺了就显示 `--`：
 
 ```json
 {"v":1,"seq":42,"t":1762761600,"host":"MY-PC",
@@ -108,6 +116,12 @@ UTF-8 无 BOM，契约上限 600 字节，实测一帧 409 字节（24 线程时
 （契约里的示例帧，不是实测日志。）为什么这么干：1Hz、600 字节对 USB CDC 来说带宽上毫无压力，
 换来的是**可读、可 `grep`、两端共用一份契约**，调试时不用为了「这帧到底对不对」再写一个解析器。
 设备侧只在 `src` 字段里自己填 `usb` 或 `wifi`，两条链路报文字节完全相同。
+
+USB 收数据还有个不装不行的坑：**不能读 console 的 stdin**。USB-Serial/JTAG 的 RX FIFO 只有 64 B，
+一帧 424 B 的突发写入会丢字节；要用 `usb_serial_jtag_driver_install()`（rx 4096）→
+`usb_serial_jtag_vfs_register()` → `usb_serial_jtag_vfs_use_driver()`，
+让 esp_log 的 TX 和 JSON 行共用同一把锁，日志才不会把数据行切碎。串口调试命令是一整套：
+`cfg` / `wifi <ssid> <pass>` / `url <url>` / `token <tok>` / `lcd [0-3]` / `reboot` / `help`。
 
 上位机 `pcmond` 只依赖 psutil + pyserial，结构上刻意把采集和传输解耦：采集线程固定周期产出一帧
 塞进 `queue.Queue(maxsize=2)`，队列满丢最旧帧，**采集永不阻塞**；USB 和 HTTP 各自读最新快照，
@@ -143,8 +157,30 @@ HTTP 的 `/api/stats` 只回最近一帧、不为每个请求重新采集。串�
 不是 bug。结论是这台状态机可以照着写代码了：「绝不在旧数据上显示在线」「3 秒断流转 STALE」
 「USB 优先」三条硬要求都有可执行模型背书。
 
+实现上还补了一个细节：USB 在线时 Wi-Fi 帧是**显式忽略**（seq 和 age 都不动，不是「只刷新」），
+HTTP 轮询整轮跳过——这样状态灯不会在数据其实来自 Wi-Fi 时长亮 USB。
+
 顺便说个心得：**这种小状态机值得建模，恰恰因为它小**——人脑觉得「就几个 if」所以不验证，
 而真正难想全的正是 init 状态、守卫边界、死锁这些角落。
+
+### 3.5 没有板子，也能把状态机真跑一遍
+
+链路层两块核心逻辑——新鲜度状态机和「帧 JSON → `stats_t`」解析——都是纯 C，不碰 GPIO / LCD /
+Wi-Fi，所以完全可以编到 PC 上跑。`firmware/test/host_link/` 干的就是这件事：把固件里**真实的
+`link.c`**（不是复制品）用 MinGW 配 FreeRTOS / esp_log / esp_err 的 shim + IDF 自带 cJSON
+编成主机程序——
+
+```bash
+GCC=/path/to/mingw64/bin/gcc.exe bash firmware/test/host_link/run.sh
+```
+
+结果 **61 checks, 0 failure**：状态机全部迁移（INIT 丢帧、USB/WiFi 抢占、3 个 tick 转 STALE、
+USB 在线时 Wi-Fi 帧被忽略、SLEEP 终态吃帧不动）、`ONLINE_* 时 age ≤ 2` 不变式、
+`frame.json` 里 424 B 的真实上位机帧解析、40 核截断到 32、占用率越界夹取、坏 JSON 拒收。
+
+它的边界也要说清楚：跑的是 x86 代码，`xSemaphore` 在 shim 里是空实现，真实 RTOS 的竞态和栈溢出
+测不到，也不覆盖 LCD / Wi-Fi / NVS。但这条路径的价值在于——**模型验证回答「设计对不对」，
+主机测试回答「代码是不是真的那么走」**，而且改状态机或解析器时不用等板子。
 
 ## 四、踩坑集：现象 → 根因 → 解法
 
@@ -191,26 +227,43 @@ kconfgen 直接失败。根因：`-B` 和 `SDKCONFIG` 都按**调用者的 cwd**
 解法：传绝对路径（`%PROJ%\%BUILD_DIR%`）。改完 `BUILD_DIR=build-lead bash tools/build.sh`
 实测通过，产物在 `firmware/build-lead/`，flash 参数 `--flash_size 16MB --flash_freq 80m` 正确。
 
+**坑 8：Montserrat 字体里没有 ↓ ↑ 字形。**
+现象（看源码时发现）：NET 卡片原本要显示 `↓ 1.2 ↑ 0.3`，但查了 vendored 字体的 `unicode_list`，
+`0x2193` / `0x2191` 根本不在里面（`0xB0`「°」在）——真机上会渲染成方框。解法：改用 ASCII
+`DN 1.2  UP 0.3 MB/s`。裁剪字体省空间，代价是符号得自己确认。
+
+**坑 9：标定模式退出后，屏幕一直停在测试图。**
+现象：静态推演发现——BOOT 长按退出标定后，UI 回不来。根因：测试图是**绕过 LVGL 直接写面板**的，
+所以 `ui_update()` 里加了「测试模式就早退」的保护；而退出分支只置了强制重绘标志、没清 lcd 的测试
+标志 → UI 一直早退，强制重绘被消费掉，屏就卡在测试图。更麻烦的是「标定中」有两个状态源
+（main 的布尔量 + lcd.c 的标志），走串口 `lcd` 进入后，BOOT 开关会以为「要进入」其实已经在里面。
+解法：① 新增 `ui_exit_test_mode()`，清标志 + 整屏 invalidate（测试图不是 LVGL 画的，
+不整屏刷就只有变化的 label 重绘）；② 删掉 main 的布尔量，统一用 `lcd_test_pattern_active()` 判状态。
+这是这轮唯一一个真 bug，而且没上板就抓到了——**两个状态源迟早要打架**。
+
 ## 五、现状与后续
 
-目前能确认的（都在仓库里可复跑）：ESP-IDF 5.5.3 工程编译通过，`tdisplay_pcmon.bin`
-195,264 字节，目标 `xtensa-esp32s3`（不是默认的 esp32），16MB 分区布局下 3MB app 槽还剩 94%；
-链路状态机模型验证 0 error / 21 warning；上位机 65 个单测 2.71 秒跑完，`--once` 输出 409 字节
-合法帧，里面是 `nvidia-smi` 读出的真实数据（RTX 5060，19%，59 °C，2203/8151 MiB，29.7 W）；
-HTTP 鉴权 200 / 401 / 404 都对，连发两次请求 `seq` 都是 7，证明 `/api/stats` 不会重复采集。
+目前能确认的（都在仓库里可复跑）：固件两层全部写完，`bash tools/build.sh` → **0 error / 0 warning**，
+`tdisplay_pcmon.bin` = `0x12ddf0` ≈ 1.18 MB，目标 `xtensa-esp32s3`，16MB 分区布局下 3MB app 槽
+还剩 61%；链路层主机离线测试 **61 checks / 0 failure**；链路状态机模型验证 0 error / 21 warning；
+上位机 65 个单测 2.71 秒跑完，`--once` 输出 424 字节合法帧，里面是 `nvidia-smi` 读出的真实数据
+（RTX 5060，19%，59 °C，2203/8151 MiB，29.7 W）；HTTP 鉴权 200 / 401 / 404 都对，连发两次请求
+`seq` 都是 7，证明 `/api/stats` 不会重复采集。
 
-还不能确认的：**屏没点亮**——显示方向、offset、mirror、invert、RGB 顺序、刷新率、按键手感，
-以及烧录流程、USB 真机丢帧率、WiFi 轮询稳定性，全部 **未验证**。点亮之后第一件事是烧测试图案，
-四步试参数把偏移和镜像定下来，然后再谈「好不好看」。这也是我坚持在 README 里放
-「已验证 / 未验证」两张清单的原因：开源的工程文档如果只写成功部分，后来的人会被坑一次。
+还不能确认的：**屏没点亮**——4 组 ST7789 候选参数哪组对、i80 时序、颜色位序、按键手感、实际帧率，
+以及烧录流程、USB 真机收帧与丢帧率、WiFi 连接与轮询、NVS 持久化、深睡，全部 **未验证**。
+点亮之后第一件事是长按 BOOT 进标定模式，把 4 组候选挨个看一遍（边框是否完整、四角是不是对的、
+色块是不是红绿蓝、白十字是否居中），判读标准写在 `docs/bringup.md` 里。这也是我坚持在 README
+里放「已验证 / 未验证」两张清单的原因：只写成功部分的工程文档，会让后来的人再踩一次。
 
-后续计划：① 点亮并校准（offset / mirror / invert / RGB），换上实机照片；② 实机压测 USB CDC
-（1Hz、约 400 B/帧的长时间稳定性、拔插重连）；③ WiFi 双模（v1 先 USB，HTTP 链路已经写好）；
-④ 3D 打印一个立式外壳，电源走 USB-C。
+后续计划：① 按 `docs/bringup.md` 点亮并标定（4 组候选 + BOOT 长按），换上实机照片；
+② 实机压测 USB（1–2Hz、424 B/帧的长时间稳定性、拔插重连）；③ WiFi 双模（v1 先 USB，
+HTTP 链路已经写好）；④ 3D 打印一个立式外壳，电源走 USB-C。
 
 仓库地址占位：`https://github.com/<your-id>/tdisplay-s3-pc-monitor`（发布时替换；本仓库采用
 **MIT** 许可，版权署名 `T-Display-S3 PC Monitor contributors`）。相关文档：架构与接口契约在
-`docs/design/architecture.md`，开发日志在 `docs/journal.md`，上位机用法在 `companion/README.md`。
+`docs/design/architecture.md`，开发日志在 `docs/journal.md`，上板清单在 `docs/bringup.md`，
+上位机用法在 `companion/README.md`。
 
 ## 六、写在最后
 
