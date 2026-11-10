@@ -464,6 +464,21 @@ WiFi 验证表格）和**真实的 Bearer Token**（写死在 `companion/tests/t
 
 > 本文档后续所有命令、日志、配置示例里，密码与 token 均已脱敏为占位符。
 
+### M11 实机照片入库 + CSDN 版文章（2026-11-10）
+
+- 用户提供实机照片（1280×960）：亚克力外壳、屏幕实时显示 GPU 29% / 74 °C / 41 W、
+  MEM 72%（11636/16108 MB）、NET DN 0.1 UP 0.8 MB/s、CPU 30% / 2200 MHz、右下角 60 点曲线，
+  顶栏状态灯是绿色 + `WIFI 0s`（说明当时走的是 WiFi 链路、帧延迟 0 秒）。
+- 入库两张：`docs/images/device.jpg`（原图，README 与博客用相对路径引用）
+  和 `docs/images/device-cover.jpg`（裁切成 1210×660 的封面，给 CSDN 首图/仓库 Social preview 用）。
+- 一个被证伪的担心：放大量过顶栏文字，确认不是被截断，就是 `WIFI 0s`（WiFi 在线 + age=0s），
+  标定排版没问题 —— **看图要先放大再下结论**，差点为一个不存在的 bug 去改代码重烧。
+- 新增 `docs/csdn-article.md`（CSDN 发布版，约 4450 中文字，含 `@[toc]` 目录、GitHub 链接 3 处）。
+- **图片外链踩坑**：`raw.githubusercontent.com` 在本机/国内**不可达**（curl 返回 000），
+  直接写 raw 地址会让 CSDN 读者看到裂图；实测 **`cdn.jsdelivr.net/gh/<user>/<repo>@main/<path>` 可达（200）**，
+  于是文章里改用 jsDelivr CDN。备选：`gh-proxy.com/<raw url>` 也 200。
+  如果哪天 jsDelivr 也挂，最后的稳妥做法是把图片直接传进 CSDN 编辑器让它转存自己的 CDN。
+
 ### 团队分工（2026-11-10 开工）
 
 | 成员 | 负责 | 写作用域 | 任务 |
