@@ -409,6 +409,38 @@ logicprobe 建模时立的三条不变式，现在有了实机证据：
 > `w:sta is connected, disconnect before connecting to new ap`——`link_http` 在 `got_ip` 之后又调了一次
 > `esp_wifi_connect()`，属于重复连接调用，功能无影响但可以清理（记在待优化项）。
 
+### M9 开源发布（2026-11-10）
+
+- 仓库：**https://github.com/landesou/tdisplay-s3-pc-monitor**（Public，MIT）。
+- **网络限制与绕法**（这台机器上很关键，换机器要注意）：
+  - `https://github.com` 和 `https://api.github.com` 都**不通**（curl 直接 000 / 连接拒绝）→ 所以
+    **gh CLI 装上也用不了**（它全靠 api.github.com）；
+  - 但 **SSH over 443 通**：`ssh -T -p 443 git@ssh.github.com` → `Hi landesou! You've successfully
+    authenticated`；remote 用 `ssh://git@ssh.github.com:443/landesou/tdisplay-s3-pc-monitor.git`，
+    推送时加 `GIT_SSH_COMMAND="ssh -p 443"`；
+  - GitHub 仓库本身必须由用户在网页端手动建（API 不通，命令行建不了仓）。
+- 提交作者已统一重写为 `landesou <landesou@users.noreply.github.com>`
+  （发布前用 `git rebase --root --exec 'git commit --amend --no-edit --reset-author'` 批量改），
+  默认分支 `main`。
+- 文档同步：README 状态改为「USB + WiFi 双链路均已实机验证」，已验证清单补 WiFi / 托盘 / 新鲜度三条，
+  未验证清单精化为 CPU 温度 / 帧率 / 长时间稳定性 / NVS 与深睡 / WiFi 断线重连 / 其它板；
+  博客替换为真实仓库地址。
+
+### 项目最终状态（2026-11-10 收尾）
+
+| 目标项 | 状态 |
+|---|---|
+| 320×170 横屏桌面监控仪 | ✅ 实机点亮、UI 正常（用户确认） |
+| ESP-IDF 5.5.3 + LVGL 9 固件 | ✅ i80 并口 ST7789 驱动、两页 UI、USB CDC + WiFi HTTP 双链路 |
+| 新鲜度状态机 | ✅ logicprobe 0 error + 真机 STALE 恢复验证 |
+| Windows 上位机 pcmond | ✅ 采集/双传输/开机自启/托盘，单测 90 passed |
+| 开源到 GitHub | ✅ https://github.com/landesou/tdisplay-s3-pc-monitor |
+| README + 记录文章 | ✅ README 已发布；博客草稿 4700+ 字在 `docs/blog-draft.md` |
+| 全过程记录 | ✅ 本文件（M0–M9） |
+
+**已知未做**：实机照片（README 已标注待补）、CPU 温度（硬件限制）、帧率与长时间稳定性实测、
+WiFi 断线重连/漫游、3D 打印外壳。
+
 ### 团队分工（2026-11-10 开工）
 
 | 成员 | 负责 | 写作用域 | 任务 |
