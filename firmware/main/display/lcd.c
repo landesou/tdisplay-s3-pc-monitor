@@ -384,7 +384,15 @@ void lcd_test_pattern(int variant)
         ESP_LOGW(TAG, "test pattern: variant %d clamped to 0", variant);
         variant = 0;
     }
+
+    /* 先置标定模式（ui.c 看到后停止刷新），再等一个刷新周期，
+     * 让可能在途的 LVGL flush/DMA 收尾 —— i80 驱动没有跨任务互斥，
+     * 两个任务同时 draw_bitmap 会打架。 */
+    s_test_active = true;
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     if (lcd_apply_variant(variant) != ESP_OK) {
+        s_test_active = false;
         return;
     }
 
@@ -430,7 +438,6 @@ void lcd_test_pattern(int variant)
     fill_rect(gx - 4, gy - 4, glyph_w + 8, glyph_h + 8, TEST_BLACK);
     draw_digit(variant, gx, gy, scale, TEST_WHITE);
 
-    s_test_active = true;
     ESP_LOGI(TAG, "test pattern drawn: variant=%d (%s)", variant, k_variants[variant].desc);
 }
 

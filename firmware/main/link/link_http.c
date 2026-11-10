@@ -137,6 +137,13 @@ static void http_poll_task(void *arg)
 
         backoff_s = BACKOFF_MIN_S;
 
+        /* USB 在线时不轮询：省流量也省 CPU（USB 优先，WiFi 帧本来就会被忽略） */
+        if (link_state() == LINK_ONLINE_USB) {
+            fails = 0;
+            vTaskDelay(pdMS_TO_TICKS(POLL_PERIOD_MS));
+            continue;
+        }
+
         stats_t snap;
         if (http_poll_once(&snap)) {
             fails = 0;

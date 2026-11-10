@@ -199,14 +199,21 @@ void link_on_frame(const stats_t *snap, link_state_t source)
         return;
     }
 
+    /* 模型：ONLINE_USB --wifi_frame--> ONLINE_USB，且该迁移不带 updates = 显式忽略。
+     * 这样「USB 掉线后最多 3 秒转 STALE，再由 wifi 帧接管」才是诚实的：
+     * 状态灯永远不会在数据其实来自 WiFi 时长亮着 USB。 */
+    if (s_state == LINK_ONLINE_USB && source == LINK_ONLINE_WIFI) {
+        xSemaphoreGive(s_lock);
+        ESP_LOGD(TAG, "wifi frame ignored (USB has priority)");
+        return;
+    }
+
     s_latest = *snap;
     s_has_frame = true;
     s_frame_count++;
     s_age = 0;
 
-    if (s_state == LINK_ONLINE_USB) {
-        /* USB 优先：WiFi 帧只刷新数据，不切态（模型里的自环） */
-    } else if (s_state == LINK_ONLINE_WIFI && source == LINK_ONLINE_USB) {
+    if (s_state == LINK_ONLINE_WIFI && source == LINK_ONLINE_USB) {
         s_state = LINK_ONLINE_USB;   /* 插上 USB 立刻接管 */
     } else {
         s_state = source;            /* NO_LINK / STALE → 对应在线态 */

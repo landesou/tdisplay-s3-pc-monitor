@@ -208,8 +208,8 @@ HTTP 鉴权 200 / 401 / 404 都对，连发两次请求 `seq` 都是 7，证明 
 （1Hz、约 400 B/帧的长时间稳定性、拔插重连）；③ WiFi 双模（v1 先 USB，HTTP 链路已经写好）；
 ④ 3D 打印一个立式外壳，电源走 USB-C。
 
-仓库地址占位：`https://github.com/<your-id>/tdisplay-s3-pc-monitor`（发布时替换；目前仓库里
-还没有 `LICENSE` 文件，许可证待定）。相关文档：架构与接口契约在
+仓库地址占位：`https://github.com/<your-id>/tdisplay-s3-pc-monitor`（发布时替换；本仓库采用
+**MIT** 许可，版权署名 `T-Display-S3 PC Monitor contributors`）。相关文档：架构与接口契约在
 `docs/design/architecture.md`，开发日志在 `docs/journal.md`，上位机用法在 `companion/README.md`。
 
 ## 六、写在最后

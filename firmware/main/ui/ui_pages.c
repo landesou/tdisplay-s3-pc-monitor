@@ -25,7 +25,6 @@
 #define DETAIL_BAR_BASE 100                                  /* 柱底基线（相对页面容器） */
 #define DETAIL_BAR_H    (DETAIL_BAR_BASE - DETAIL_BAR_TOP)   /* 98 px 满量程 */
 
-static lv_obj_t *s_tracks[DETAIL_BARS];
 static lv_obj_t *s_fills[DETAIL_BARS];
 static lv_obj_t *s_line1;
 static lv_obj_t *s_line2;
@@ -83,7 +82,6 @@ void ui_detail_create(lv_obj_t *parent)
         lv_obj_set_style_bg_color(track, lv_color_hex(UI_COL_TRACK), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(track, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_radius(track, 2, LV_PART_MAIN);
-        s_tracks[i] = track;
     }
     for (int i = 0; i < DETAIL_BARS; i++) {
         lv_obj_t *fill = lv_obj_create(parent);

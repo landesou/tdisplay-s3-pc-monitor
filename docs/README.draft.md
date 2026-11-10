@@ -14,7 +14,7 @@
 > LilyGO **T-Display-S3** (ESP32-S3, 8-bit 8080 parallel ST7789, 16 MB flash).
 > A Python host daemon (`pcmond`) samples CPU / RAM / GPU / network / disk every
 > second and pushes one compact JSON line over **USB CDC** (HTTP + Wi-Fi as
-> fallback). Firmware: ESP-IDF 5.5.3 + LVGL 9.2.2. Host: Python 3.10+.
+> fallback). Firmware: ESP-IDF 5.5.3 + LVGL 9.2.2. Host: Python 3.10+. **License: MIT.**
 > **Status:** firmware builds, link state machine is model-verified (0 errors),
 > host passes 65 unit tests — **the panel has not been lit yet**, see
 > [Verified / Unverified](#已验证--未验证).
@@ -106,8 +106,14 @@ T-Display-S3（ESP-IDF 5.5.3 + LVGL 9.2.2）
 ## 快速开始
 
 > 环境前提：ESP-IDF **5.5.3**、Python **3.10+**、Windows（上位机目前只验证了 Windows）。
-> **注意**：`tools/idf_build.cmd` 顶部硬编码了作者本机的 IDF 路径
-> （`D:\ESP32-S3\Espressif\...`），换机器必须先改 `IDF_ROOT` / `IDF_TOOLS_PATH` / `PYENV` 三个变量。
+> **IDF 路径**：`tools/idf_build.cmd` 默认走本机的 ESP-IDF 安装位置，克隆到别的机器时
+> **不用改脚本**，用环境变量覆盖即可（默认值仍是本机安装位置，例如）：
+>
+> ```bat
+> set ESP_IDF_DIR=D:\path\to\esp-idf-v5.5.3
+> set ESP_IDF_TOOLS_DIR=D:\path\to\espressif
+> set ESP_IDF_PYENV=%ESP_IDF_TOOLS_DIR%\python_env\idf5.5_py3.11_env
+> ```
 
 ### 1) 拉固件依赖（LVGL 9.2.2，不走组件管理器）
 
@@ -298,9 +304,11 @@ tdisplay-s3-pc-monitor/
 
 ## 许可与致谢
 
-- **许可证**：本仓库目前**还没有 `LICENSE` 文件**——许可证待作者选定，发布前会补上（没有许可证
-  默认保留所有权利，clone 前请注意）。`tools/fetch_deps.cmd` 会把 LVGL 的 `LICENCE.txt`
-  一并拷到 `firmware/components/lvgl/`，其许可随源码保留。
+- **许可证**：本仓库采用 **MIT**（见仓库根 [`LICENSE`](LICENSE)，版权署名
+  `T-Display-S3 PC Monitor contributors`）。本项目用到的第三方许可均兼容：ESP-IDF 官方 i80 示例是
+  **CC0**，LVGL 9.2.2 是 **MIT**，参考项目 cc-usage-display 是 **MIT**。
+  `tools/fetch_deps.cmd` 会把 LVGL 的 `LICENCE.txt` 一并拷到 `firmware/components/lvgl/`，
+  其许可随源码保留。
 - **致谢**：
   - [ESP-IDF](https://github.com/espressif/esp-idf) 官方 `examples/peripherals/lcd/i80_controller/`
     ——本项目的 i80 并口总线、ST7789 初始化、双 draw buffer、LVGL 9 移植层，路子都从这里来。

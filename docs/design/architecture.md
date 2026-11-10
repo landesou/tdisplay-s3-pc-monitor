@@ -108,9 +108,17 @@ modelHash `88fee4edf864`，见 `docs/design/link-state-machine.model.json`）：
 | `page` | 上次停留页 |
 
 首次配置两种方式（都实现，成本很低）：
-1. 串口命令行：`wifi <ssid> <pass>`、`url <url>`、`token <tok>`、`cfg`、`reboot`。
-2. **USB 下发**：上位机读到设备 `{"t":"hello","need_cfg":1}` 后，回一帧 `{"t":"cfg",...}`，
-   设备写 NVS 并重启。用户不用手敲密码（推荐路径）。
+1. 串口命令行：`wifi <ssid> <pass>`、`url <url>`、`token <tok>`、`cfg`、`reboot`、`lcd [0-3]`、`help`。
+2. **USB 下发**：设备启动后发一行 `{"t":"hello","need_cfg":1}`（`need_cfg` = 未配置 Wi-Fi 时为 1），
+   上位机回一帧配置，设备写 NVS 并重启。**字段名以上位机实际实现为准**（2026-11-10 核对
+   `companion/pcmond/usb_link.py`）：
+
+```json
+{"t":"cfg","wifi_ssid":"MyWiFi","wifi_pass":"***","api_url":"http://10.21.132.85:8787/api/stats","api_token":"<24字符>"}
+```
+
+> 注意：上面是**真实字段名**（`wifi_ssid` / `wifi_pass` / `api_url` / `api_token`），早期草稿里写成
+> `ssid`/`pass`/`url`/`token` 是简写，不要照抄。`api_url` 由上位机的 `lan_ip()` 生成，不写 `127.0.0.1`。
 
 ## 5. 目录/写作用域（团队协作用）
 

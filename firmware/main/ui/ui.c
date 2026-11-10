@@ -65,6 +65,7 @@ static bool s_ready;
 static uint32_t s_last_seq;
 static bool     s_have_seq;
 static uint32_t s_last_chart_seq;
+static uint32_t s_last_chart_time;
 static bool     s_chart_have;
 static bool     s_last_stale = false; /* 初值特意与「无数据时 stale=true」相反，保证首帧必刷 */
 static bool     s_last_have;
@@ -431,27 +432,33 @@ void ui_update(const stats_t *s, link_state_t st, uint32_t age_s)
     page0_update(s, stale);
     ui_detail_update(s, stale);
 
-    /* 曲线：只在「有新帧且新鲜」时推进一个点。
+    /* 曲线：只在「有新帧且新鲜」时推进一个点，并且按 PC 时间戳**每秒最多推一个**
+     * —— 上位机 1~2 Hz 发帧，按帧推会变成 2 点/秒，60 点窗口只剩 30 秒。
      * STALE 时不能拿旧值继续刷，否则曲线会把断流画成平稳运行。 */
-    if (have && !stale && (!s_chart_have || s->seq != s_last_chart_seq)) {
-        int32_t cpu_v = (int32_t)(s->cpu_pct + 0.5f);
-        int32_t gpu_v = s->has_gpu ? s->gpu_util : 0;
-        if (cpu_v < 0) {
-            cpu_v = 0;
+    if (have && !stale) {
+        bool new_second = (s->pc_time != 0) ? (s->pc_time != s_last_chart_time)
+                                            : (s->seq != s_last_chart_seq);
+        if (!s_chart_have || new_second) {
+            int32_t cpu_v = (int32_t)(s->cpu_pct + 0.5f);
+            int32_t gpu_v = s->has_gpu ? s->gpu_util : 0;
+            if (cpu_v < 0) {
+                cpu_v = 0;
+            }
+            if (cpu_v > 100) {
+                cpu_v = 100;
+            }
+            if (gpu_v < 0) {
+                gpu_v = 0;
+            }
+            if (gpu_v > 100) {
+                gpu_v = 100;
+            }
+            lv_chart_set_next_value(s_chart, s_ser_cpu, cpu_v);
+            lv_chart_set_next_value(s_chart, s_ser_gpu, gpu_v);
+            s_last_chart_seq = s->seq;
+            s_last_chart_time = s->pc_time;
+            s_chart_have = true;
         }
-        if (cpu_v > 100) {
-            cpu_v = 100;
-        }
-        if (gpu_v < 0) {
-            gpu_v = 0;
-        }
-        if (gpu_v > 100) {
-            gpu_v = 100;
-        }
-        lv_chart_set_next_value(s_chart, s_ser_cpu, cpu_v);
-        lv_chart_set_next_value(s_chart, s_ser_gpu, gpu_v);
-        s_last_chart_seq = s->seq;
-        s_chart_have = true;
     }
 }
 
@@ -464,6 +471,9 @@ void ui_next_page(void)
     if (lcd_test_pattern_active()) {
         lcd_test_pattern_stop();
         ESP_LOGI(TAG, "leave test-pattern mode");
+        /* 测试图是绕过 LVGL 直接写面板的像素，LVGL 并不知道屏上已经变了。
+         * 不整屏失效的话，退出后只有后续变化的 label 会重绘，其余仍是测试图。 */
+        lv_obj_invalidate(lv_screen_active());
     }
     s_page = (uint8_t)((s_page + 1u) % 2u);
     apply_page();

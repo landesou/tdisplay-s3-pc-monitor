@@ -25,10 +25,9 @@
  *   避免日志和我们的 JSON 行在同一个 FIFO 里交错。
  */
 
-/* lcd 变体切换命令（`lcd` / `lcd N`）。
- * fw-display 正在往 lcd.h 加 lcd_test_variant_next/set/get；等他们落地后把下面这行改成 1 即可。
- * TODO(lead): 2026-11-10 编译时 lcd.h 还没有这三个函数，先关掉。 */
-#define PCM_LCD_TEST_VARIANTS 0
+/* lcd 变体切换命令（`lcd` / `lcd N`）：调 fw-display 提供的 lcd_test_variant_*
+ * 标定屏幕 offset/mirror/invert/颜色序。 */
+#define PCM_LCD_TEST_VARIANTS 1
 #if PCM_LCD_TEST_VARIANTS
 #include "display/lcd.h"
 #endif
@@ -244,6 +243,7 @@ static void usb_rx_task(void *arg)
     static char line[USB_LINE_MAX];
     size_t line_len = 0;
     bool   skipping = false;
+    bool   hello_sent_once = false;
     int64_t next_hello = esp_timer_get_time() + 2000 * 1000;   /* 上电 2 秒后先握一次手 */
 
     ESP_LOGI(TAG, "usb rx task started");
@@ -272,10 +272,14 @@ static void usb_rx_task(void *arg)
             }
         }
 
-        /* 没配置过 Wi-Fi 就周期性握手，等上位机把配置推下来 */
-        if (!s_cfg_received && esp_timer_get_time() >= next_hello) {
-            if (!cfg_has_wifi()) {
-                send_hello();
+        /* 握手：上电先发一次（让上位机知道设备活着）；
+         * 还没配 Wi-Fi 时每 5 秒重复，等上位机把配置推下来。 */
+        if (esp_timer_get_time() >= next_hello) {
+            if (!hello_sent_once || !cfg_has_wifi()) {
+                if (!s_cfg_received) {
+                    send_hello();
+                    hello_sent_once = true;
+                }
             }
             next_hello = esp_timer_get_time() + HELLO_PERIOD_US;
         }
@@ -297,7 +301,10 @@ esp_err_t link_usb_start(void)
         return err;
     }
 
-    /* console 也走驱动，避免日志和 JSON 行在 TX FIFO 里交错 */
+    /* console 也走驱动，避免日志和 JSON 行在 TX FIFO 里交错。
+     * console=USB_SERIAL_JTAG 时 VFS 已由系统自动注册，这里再注册一次只会返回
+     * ESP_ERR_INVALID_STATE，忽略即可；console 配到别处时这一步让 VFS 也能用起来。 */
+    (void)usb_serial_jtag_vfs_register();
     usb_serial_jtag_vfs_use_driver();
 
     BaseType_t ok = xTaskCreate(usb_rx_task, "link_usb", USB_TASK_STACK, NULL, USB_TASK_PRIO, NULL);

@@ -215,6 +215,47 @@ writer 交付两篇（`docs/README.draft.md` 319 行、`docs/blog-draft.md` 222 
 **工具可移植性**：`tools/idf_build.cmd` 里原来硬编码本机 ESP-IDF 路径，已改成可用环境变量覆盖
 （`ESP_IDF_DIR` / `ESP_IDF_TOOLS_DIR` / `ESP_IDF_PYENV`），默认值仍是本机安装位置，克隆到别的机器不用改脚本。
 
+### M2.5 固件链路层完成（2026-11-10，Lead 已复核离线测试）
+
+fw-link 交付 `link.c`(369) / `link_usb.c`(316) / `link_http.c`(240) / `cfg.c`(178)，编译 `tdisplay_pcmon.bin`
+约 1.18 MB（3 MB 分区剩 61%）。**它自己搭了一个主机离线测试**：把固件里**真实的 `link.c`** 用 MinGW gcc
+配 FreeRTOS/esp_log/esp_err shim + IDF 自带 cJSON 编到 Windows 上跑。Lead 复跑 `bash run.sh` →
+**61 checks / 0 failure**（含状态机全迁移、`ONLINE_* age<=2` 不变式、上位机真实 424 B 帧解析、
+40 核截断到 32、越界夹取、坏 JSON 拒收）。
+
+这条经验对这个项目很有价值：**没有板子也能验证固件行为**——只要被验证的模块不直接碰寄存器，
+用 shim 把 IDF 头文件替换掉就能在 PC 上跑。已批准搬进仓库 `firmware/test/host_link/`。
+
+**技术事实（fw-link 实测/查证，已接受）**：
+
+1. **USB 收数据必须装驱动，不能读 console 的 stdin**：USB-Serial/JTAG 的 RX FIFO 只有 **64 B**，
+   而一帧 JSON 是 ~424 B 的突发写入，console 的 no-driver VFS 轮询路径会丢字节。
+   正确姿势：`usb_serial_jtag_driver_install()`（rx 4096）→ `usb_serial_jtag_vfs_register()`
+   （重复注册返回 INVALID_STATE，忽略）→ `usb_serial_jtag_vfs_use_driver()`，
+   让 esp_log 的 TX 与 JSON 行共用同一把锁，避免日志和数据行在 FIFO 里交错。
+2. **上位机真实帧 424 B**（契约上限 600 B）；`host="LAPTOP-4J1FBMVH"` 正好 15 字符卡满；
+   `gpu.name` 34 字符被设备端截到 19（`STATS_GPU_NAME_LEN=20`）。
+3. **cfg 下发帧的真实字段名是 `wifi_ssid`/`wifi_pass`/`api_url`/`api_token`**（architecture §4 里写的
+   `ssid`/`pass`/`url`/`token` 是简写）→ 以 `companion/pcmond/usb_link.py` 的实现为准，**architecture.md 已按此修正**。
+4. **USB 在线时 WiFi 帧是"显式忽略"**（模型里那条迁移没有 updates），不是"只刷新"：
+   这样状态灯不会在数据其实来自 WiFi 时长亮 USB。HTTP 轮询在 `LINK_ONLINE_USB` 时整个跳过。
+5. 主机测试用的 gcc：`D:\ESP32-S3\x86_64-8.1.0-release-posix-seh-rt_v6-rev0\mingw64\bin\gcc.exe`
+   （不在 PATH 上）；MinGW 8.1 没有 `strlcpy`，shim 里用宏映射。
+
+**未实机验证**：USB 实际收帧与 hello/cfg 往返、WiFi 连接与 HTTP 轮询、NVS 持久化、串口命令、深睡。
+
+### M2.6 离线测试入仓 + 标定模式接线（2026-11-10）
+
+- fw-link 把主机测试搬进 `firmware/test/host_link/`（`run.sh` + `test_link.c` + `shim/` + `frame.json` + `README.md`）。
+  Lead 复验：仓库根跑 `GCC=<mingw gcc> bash firmware/test/host_link/run.sh` → **61 checks, 0 failure**；
+  不设 `GCC` 且 PATH 里没有 gcc 时会打安装提示并 `exit 2`（实测过）。产物目录已加进 `.gitignore`。
+  → 项目现在有一条「没有板子也能验证固件行为」的路径，这对后面改状态机/解析器非常重要。
+- Lead 在 `main.c` 里接了**屏幕标定模式**：长按 BOOT 2 秒进入/退出，进入后短按 BOOT 切下一组候选参数
+  （调用 `lcd_test_variant_next()`），标定模式下主循环跳过 UI 刷新，避免 LVGL 抢画测试图案；
+  退出时置 `s_force_repaint` 强制重绘回 UI。
+- 新增 `docs/bringup.md`：上板点亮/黑屏排查表/4 组参数标定判断标准/上位机联调/WiFi 联调/结果回填要求。
+  这份是「板子到手当天照着做」的操作手册，**里面屏幕相关步骤本身尚未执行过**。
+
 ### 团队分工（2026-11-10 开工）
 
 | 成员 | 负责 | 写作用域 | 任务 |

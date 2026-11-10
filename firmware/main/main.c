@@ -36,13 +36,19 @@ static void buttons_init(void)
 
 /* 简单按键扫描：软件消抖 + 短按/长按。100ms 调用一次。
  * KEY  短按：翻页；KEY  长按(2s)：深睡。
- * BOOT 短按：切换亮度（BOOT 是 strapping 脚，不支持长按）。 */
+ * BOOT 短按：切换亮度；BOOT 长按(2s)：进入/退出「屏幕标定模式」（配合 lcd_test_variant_*）。
+ *   ——标定模式下 BOOT 短按改成切下一组候选参数，便于板子到手后不重烧固件就轮换 4 组参数。 */
+static bool s_lcd_test_mode = false;
+static bool s_force_repaint = false;
+
 static void buttons_poll(void)
 {
     static bool key_down_prev = false;
     static bool boot_down_prev = false;
     static int  key_hold_ticks = 0;
+    static int  boot_hold_ticks = 0;
     static bool key_long_fired = false;
+    static bool boot_long_fired = false;
 
     bool key_down = gpio_get_level(BOARD_BTN_KEY) == 0;
     bool boot_down = gpio_get_level(BOARD_BTN_BOOT) == 0;
@@ -75,12 +81,38 @@ static void buttons_poll(void)
     }
     key_down_prev = key_down;
 
-    /* --- BOOT（只在按下沿动作）--- */
-    if (boot_down && !boot_down_prev) {
-        s_bright_idx = (s_bright_idx + 1) % (int)(sizeof(k_bright_levels) / sizeof(k_bright_levels[0]));
-        lcd_backlight_set(k_bright_levels[s_bright_idx]);
-        cfg_set_brightness(k_bright_levels[s_bright_idx]);
-        ESP_LOGI(TAG, "brightness -> %u%%", k_bright_levels[s_bright_idx]);
+    /* --- BOOT：短按切亮度 / 标定模式下切参数组；长按 2s 切换标定模式 --- */
+    if (boot_down) {
+        if (boot_hold_ticks < 1000) {
+            boot_hold_ticks++;
+        }
+        if (!boot_long_fired && boot_hold_ticks >= 20) { /* 20 * 100ms = 2s */
+            boot_long_fired = true;
+            s_lcd_test_mode = !s_lcd_test_mode;
+            if (s_lcd_test_mode) {
+                int v = lcd_test_variant_get();
+                lcd_test_pattern(v);
+                ESP_LOGI(TAG, "LCD calibration mode ON, variant %d", v);
+            } else {
+                s_force_repaint = true;
+                ESP_LOGI(TAG, "LCD calibration mode OFF");
+            }
+        }
+    }
+    if (!boot_down && boot_down_prev) {
+        if (!boot_long_fired) {
+            if (s_lcd_test_mode) {
+                int v = lcd_test_variant_next();
+                ESP_LOGI(TAG, "LCD calibration variant -> %d", v);
+            } else {
+                s_bright_idx = (s_bright_idx + 1) % (int)(sizeof(k_bright_levels) / sizeof(k_bright_levels[0]));
+                lcd_backlight_set(k_bright_levels[s_bright_idx]);
+                cfg_set_brightness(k_bright_levels[s_bright_idx]);
+                ESP_LOGI(TAG, "brightness -> %u%%", k_bright_levels[s_bright_idx]);
+            }
+        }
+        boot_hold_ticks = 0;
+        boot_long_fired = false;
     }
     boot_down_prev = boot_down;
 }
@@ -108,9 +140,16 @@ static void app_task(void *arg)
         uint32_t seq = link_frame_seq();
         link_state_t st = link_state();
 
-        bool need_repaint = (has != last_has) || (has && seq != last_seq) ||
+        /* 标定模式：屏幕交给 lcd_test_pattern，UI 不要抢刷新 */
+        if (s_lcd_test_mode && !s_force_repaint) {
+            continue;
+        }
+
+        bool need_repaint = s_force_repaint || (has != last_has) ||
+                            (has && seq != last_seq) ||
                             (st != LINK_ONLINE_USB && st != LINK_ONLINE_WIFI);
         if (need_repaint) {
+            s_force_repaint = false;
             last_has = has;
             last_seq = seq;
             lvgl_lock();
