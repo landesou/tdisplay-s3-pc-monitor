@@ -54,8 +54,8 @@ set "PATH=%PATH%;%PATH_ORIG%"
 
 set "PROJ=%~dp0..\firmware"
 set "ACTION=%~1"
+set "PORT=%~2"
 if "%ACTION%"=="" set "ACTION=build"
-shift
 
 set "BUILDARG="
 set "SDKCONFARG="
@@ -75,12 +75,20 @@ if not exist "%PROJ%\sdkconfig" if not defined BUILD_DIR (
 )
 
 if /i "%ACTION%"=="flash" (
-    set "PORT=%~1"
     if "%PORT%"=="" (
-        echo [idf_build] usage: idf_build.cmd flash COMx
+        echo [idf_build] usage: idf_build.cmd flash COMn
         exit /b 2
     )
     "%PY%" "%IDF_ROOT%\tools\idf.py" -C "%PROJ%" %BUILDARG% %SDKCONFARG% %TARGETARG% -p %PORT% flash
+    if errorlevel 1 exit /b 4
+    rem ESP32-S3 native USB: a USB-triggered reset always lands in the ROM
+    rem downloader (GPIO0 is pulled low by the USB-JTAG reset path), so after
+    rem flashing the board would otherwise sit in download mode until a physical
+    rem power cycle. A watchdog reset lets the ROM boot the app again, so one
+    rem flash = one running app, no cable replug needed.
+    echo [idf_build] booting the app back from download mode (watchdog reset)
+    "%PY%" "%IDF_ROOT%\tools\idf.py" --version >nul 2>&1
+    "%PY%" -m esptool --chip esp32s3 -p %PORT% --before no_reset --after watchdog_reset flash_id >nul 2>&1
 ) else (
     "%PY%" "%IDF_ROOT%\tools\idf.py" -C "%PROJ%" %BUILDARG% %SDKCONFARG% %TARGETARG% %ACTION%
 )

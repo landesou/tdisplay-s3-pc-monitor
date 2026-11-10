@@ -1,0 +1,4 @@
+# 可选依赖：系统托盘（默认不装，setup.ps1 加 -WithTray 或手动安装）
+# 没装也能跑 pcmond，只是没有托盘图标（自动降级 + 记一条 warning）
+pystray>=0.19,<1
+Pillow>=10,<14

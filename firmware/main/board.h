@@ -43,4 +43,6 @@
 #define BOARD_PIN_BATTERY   4   /* ADC1_CH3，v1 仅读取备用 */
 
 /* ---- 其它 ---- */
-#define BOARD_LCD_PIXEL_CLOCK_HZ  (20 * 1000 * 1000)
+/* 官方 LilyGO 配置用 16 MHz（"Too low or too high pixel clock may cause screen mosaic"），
+ * 先用官方值保证稳定，跑通后再往上试。 */
+#define BOARD_LCD_PIXEL_CLOCK_HZ  (16 * 1000 * 1000)

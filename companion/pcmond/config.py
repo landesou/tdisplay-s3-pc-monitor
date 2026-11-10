@@ -49,6 +49,7 @@ class Config:
     serial: Optional[str] = None  # None = 自动发现 ESP32-S3
     usb_enabled: bool = True
     http_enabled: bool = True
+    tray_enabled: bool = True  # 托盘是可选依赖：没装 pystray 时自动降级
     interval_s: float = 1.0  # 采集周期
     usb_hz: float = 1.0  # USB 推送频率（契约 1–2 Hz）
     # 可选：设备 hello 请求配置时，通过 USB 下发写 NVS（架构 §4）
@@ -89,6 +90,7 @@ class Config:
             config.serial = str(serial).strip() or None
         config.usb_enabled = _pick(raw, "usb_enabled", config.usb_enabled, _as_bool)
         config.http_enabled = _pick(raw, "http_enabled", config.http_enabled, _as_bool)
+        config.tray_enabled = _pick(raw, "tray_enabled", config.tray_enabled, _as_bool)
         config.interval_s = _clamp(_pick(raw, "interval_s", config.interval_s, float), 0.2, 60.0)
         config.usb_hz = _clamp(_pick(raw, "usb_hz", config.usb_hz, float), 1.0, 2.0)
         for key in ("wifi_ssid", "wifi_pass"):
@@ -110,6 +112,7 @@ class Config:
             "serial": self.serial,
             "usb_enabled": self.usb_enabled,
             "http_enabled": self.http_enabled,
+            "tray_enabled": self.tray_enabled,
             "interval_s": self.interval_s,
             "usb_hz": self.usb_hz,
             "wifi_ssid": self.wifi_ssid,

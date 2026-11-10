@@ -7,8 +7,9 @@ import logging
 import logging.handlers
 import platform
 import sys
+import threading
 import time
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from . import __version__
 from .collectors import Collector
@@ -33,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--serial", help="指定串口，如 COM7（默认自动发现 ESP32-S3）")
     parser.add_argument("--no-usb", action="store_true", help="本次关闭 USB 链路")
     parser.add_argument("--no-http", action="store_true", help="本次关闭 HTTP 链路")
+    parser.add_argument("--no-tray", action="store_true", help="本次关闭系统托盘（即使装了 pystray）")
     parser.add_argument("--interval", type=float, help="采集周期秒（默认 1.0）")
     parser.add_argument("--version", action="version", version=f"pcmond {__version__}")
     return parser
@@ -50,6 +52,8 @@ def apply_overrides(config: Config, args: argparse.Namespace) -> Config:
         config.usb_enabled = False
     if args.no_http:
         config.http_enabled = False
+    if args.no_tray:
+        config.tray_enabled = False
     if args.interval is not None:
         config.interval_s = max(0.2, float(args.interval))
     return config
@@ -108,9 +112,11 @@ def run_daemon(config: Config) -> int:
     LOGGER.info("配置文件：%s", CONFIG_PATH)
     LOGGER.info("Bearer Token：%s", config.token)
 
+    stop_event = threading.Event()
     sampler = Sampler(config.interval_s)
     http_link: Optional[HttpLink] = None
-    usb_link: Optional[object] = None
+    usb_link: Optional[Any] = None
+    tray_icon: Optional[Any] = None
 
     try:
         sampler.start()
@@ -135,19 +141,64 @@ def run_daemon(config: Config) -> int:
         else:
             LOGGER.info("USB 链路已按参数关闭")
 
-        try:
-            while True:
-                time.sleep(1.0)
-        except KeyboardInterrupt:
-            LOGGER.info("收到 Ctrl+C，开始退出")
+        tray_icon = _start_tray(config, sampler, http_link, usb_link, stop_event)
+
+        # 托盘「退出」会 set stop_event；Ctrl+C 走下面分支，两者都优雅退出
+        while not stop_event.wait(1.0):
+            pass
+    except KeyboardInterrupt:
+        LOGGER.info("收到 Ctrl+C，开始退出")
     finally:
+        if tray_icon is not None:
+            tray_icon.stop()
         if usb_link is not None:
-            usb_link.stop()  # type: ignore[attr-defined]
+            usb_link.stop()
         if http_link is not None:
             http_link.stop()
         sampler.stop()
         LOGGER.info("pcmond 已退出")
     return 0
+
+
+def _start_tray(
+    config: Config,
+    sampler: Sampler,
+    http_link: Optional[HttpLink],
+    usb_link: Optional[Any],
+    stop_event: threading.Event,
+) -> Optional[Any]:
+    """托盘是可选功能：依赖缺失/启动失败都只记日志，返回 None 继续无托盘运行。"""
+    if not config.tray_enabled:
+        LOGGER.info("系统托盘已按配置/参数关闭（--no-tray）")
+        return None
+    try:
+        from .netinfo import lan_ip
+        from .tray import TrayIcon, TrayStatus
+    except ImportError as exc:  # 防御性兜底：tray 模块内部已处理可选依赖
+        LOGGER.warning("托盘模块不可用：%s；继续无托盘运行", exc)
+        return None
+
+    bound_port = http_link.bound_port if http_link is not None and http_link.bound_port else config.port
+    base_url = f"http://{lan_ip() or '127.0.0.1'}:{bound_port}"
+
+    def status_provider() -> "TrayStatus":
+        snapshot = sampler.latest()
+        return TrayStatus(
+            usb_connected=bool(usb_link is not None and usb_link.connected),
+            usb_port=usb_link.port_name if usb_link is not None else config.serial,
+            http_running=bool(http_link is not None and http_link.running),
+            http_port=bound_port,
+            http_url=base_url,
+            seq=snapshot.get("seq") if snapshot else None,
+            last_frame_epoch=snapshot.get("t") if snapshot else None,
+            interval_s=config.interval_s,
+            token=config.token,
+        )
+
+    tray_icon = TrayIcon(status_provider, stop_event.set, config_dir=CONFIG_PATH.parent, log_path=LOG_PATH)
+    if not tray_icon.start():
+        return None
+    return tray_icon
 
 
 def main(argv: Optional[List[str]] = None) -> int:

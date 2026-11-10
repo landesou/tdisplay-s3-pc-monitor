@@ -318,6 +318,49 @@ fw-display 交付：`lcd.c`(459 行) / `lvgl_port.c`(203) / `ui.c`(485) / `ui_pa
 所有跟画面有关的参数（ST7789 offset/mirror/invert/RGB、i80 时序、20 MHz 稳不稳）都是"照官方示例 +
 静态推演"，必须上板标定。`docs/bringup.md` 就是为那一刻准备的手册。
 
+### M5 **屏幕点亮**（2026-11-10，实机，用户确认画面正确）
+
+这是整个项目最关键的一段，也是最踩坑的一段。完整链路：
+
+**1. 烧录先卡在进不了下载模式**
+- 现象：`esptool` 报 `Write timeout`，连不上。
+- 根因：出厂固件（GIF 播放 demo）**不读 USB CDC 的接收通道**，so 主机写入的同步字节被 NAK；
+  pyserial 单独写 8 字节同样超时，证明跟 esptool 无关。
+- 解法：按住 **BOOT** 键再拔插 USB（GPIO0 低 → ROM 下载模式），写入正常。
+- 附：烧完芯片会**停在下载模式**（ESP32-S3 原生 USB 的复位只能进 ROM，GPIO0 被 USB-JTAG 复位路径拉低）。
+  **`esptool --after watchdog_reset flash_id` 能让它自己跳回 App**——这条已固化进 `tools/idf_build.cmd`，
+  现在「烧录 + 自动重启」一步完成，不用再拔插。（`esptool run` 不行，只会停在 bootloader。）
+
+**2. 固件跑起来了，但屏幕不更新**
+- 串口能抓到自己的启动日志（`lcd init done`、`lvgl task started`、`ui init done`），外设全过。
+- 但屏幕上一直是**上一版固件留在 GRAM 里的旧像素图**，刷测试图/切参数都没反应。
+- 关键推理：背光是亮的（能看到旧图）→ 供电没问题；旧 GRAM 内容原样保留 → 我们的写根本没进面板。
+
+**3. 用「裸总线自检」把问题二分**
+在 `main.c` 里加了开机自检（`BOOT_DISPLAY_SELFTEST`）：**绕过 LVGL 和 panel 驱动**，直接
+发 `CASET/RASET/RAMWR + tx_color` 刷纯色。这里踩到两个细节：
+- 第一版「一次设窗口、多段续写」只有**一小条**变色 —— ST7789 在 CS 每次上升沿后不一定续写窗口；
+  改成**每块都重设窗口 + 重发 RAMWR**（与大驱动 `draw_bitmap` 一致）才正确。
+- 自检必须显式发 `SLPOUT(0x11)` + `DISPON(0x29)`，否则面板在 sleep-in 状态，写进去也不显示。
+
+**4. 真正的元凶：`LCD RD`（GPIO9）浮空**
+- 现象：自检刷红/绿/四象限时，屏幕都是「**一半白 + 一半花屏**」。
+- 根因：**RD（读使能）没有驱动成高电平**。ST7789 的 RD 低有效，悬空/被拉低时面板会朝 8 位数据总线
+  反向驱动，与我们的写操作抢总线 → 数据被打花，未覆盖区域保持上电随机值（发白）。
+- 证据：LilyGO 官方 Arduino 配置 `lib/TFT_eSPI/User_Setups/Setup206_LilyGo_T_Display_S3.h`
+  里 `TFT_RD 9` 是当普通输出脚驱动的；而 ESP-IDF 的 `esp_lcd_i80_bus_config_t` **根本没有 rd_gpio_num 字段**，
+  谁也没帮我们管这根线。
+- 修法：`lcd_init()` 之前把 GPIO9 `gpio_config` 成输出并拉高（`main.c` 里 `RD hold HIGH`）。
+- 同时把 PCLK 从 20 MHz 降到官方值 **16 MHz**（官方注释：过高会导致 mosaic）。
+
+**5. 结果**
+- 修完 RD 后，屏幕立刻出字：**CPU / GPU / MEM / NET 四张卡片 + 顶栏**，用户确认「画面完全对了」。
+- 最终采用的 ST7789 参数 = V0：**MV + MX + invert + RGB + gap(0,35)**（170 宽在 240 列里居中 35）。
+- 上位机 `pcmond` 同时接上：USB 推帧 1 Hz，HTTP 侧 `seq` 连续递增（60→63），界面数字实时刷新。
+
+**这条"RD 浮空"值得单独立卡**：它不会报任何错，`esp_lcd` 的初始化全部返回 `ESP_OK`，
+日志也一切正常，只有画面是花的——典型的"软件全对、硬件抢总线"。
+
 ### 团队分工（2026-11-10 开工）
 
 | 成员 | 负责 | 写作用域 | 任务 |

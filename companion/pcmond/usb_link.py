@@ -22,11 +22,13 @@ from .snapshot import to_json
 
 LOGGER = logging.getLogger(__name__)
 
-ESP32_VID = 0x303A  # Espressif USB-Serial/JTAG
+ESP32_VID = 0x303A  # Espressif
+ESP32_PID_USB_SERIAL_JTAG = 0x1001  # S3 内置 USB-Serial/JTAG（本机板子实测 303A:1001）
 SERIAL_HINTS = ("USB 串行设备", "USB JTAG", "USB-SERIAL", "ESP32", "ESPRESSIF")
 SERIAL_BAUDRATE = 115200
 DEVICE_READ_TIMEOUT_S = 0.2
-WRITE_TIMEOUT_S = 1.0
+WRITE_TIMEOUT_S = 0.5  # 设备端没读走数据时写会阻塞；别等太久，保持推帧节奏
+WRITE_WARN_INTERVAL_S = 5.0  # 写超时告警限频，避免日志刷屏
 RECONNECT_INITIAL_S = 0.5
 RECONNECT_MAX_S = 10.0
 IDLE_SLEEP_S = 0.05
@@ -37,10 +39,18 @@ def _port_text(port: Any) -> str:
 
 
 def find_port(override: Optional[str] = None, ports: Optional[List[Any]] = None) -> Optional[str]:
-    """找 ESP32-S3 USB CDC 串口：优先 VID 0x303A，其次描述含 USB 串行设备/USB JTAG。"""
+    """找 ESP32-S3 的 USB CDC 串口。
+
+    匹配优先级：`--serial` 指定 > VID 0x303A + PID 0x1001（S3 内置 USB-Serial/JTAG）
+    > 任意 VID 0x303A（如 TinyUSB CDC 303A:0002）> 描述含 USB 串行设备/USB JTAG 等。
+    本机以后可能同时插别的 Espressif 设备，所以先认 PID，避免误抓。
+    """
     if override:
         return override
     candidates = list(list_ports.comports() if ports is None else ports)
+    for port in candidates:
+        if getattr(port, "vid", None) == ESP32_VID and getattr(port, "pid", None) == ESP32_PID_USB_SERIAL_JTAG:
+            return port.device
     for port in candidates:
         if getattr(port, "vid", None) == ESP32_VID:
             return port.device
@@ -62,12 +72,18 @@ class UsbLink:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self.port_name: Optional[str] = None
+        self._last_write_warn = 0.0
 
     # ---- 生命周期 ----
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="pcmond-usb", daemon=True)
         self._thread.start()
+
+    @property
+    def connected(self) -> bool:
+        """串口当前是否真的打开着（托盘绿色状态依据）。"""
+        return self.port_name is not None
 
     def stop(self) -> None:
         self._stop.set()
@@ -93,9 +109,13 @@ class UsbLink:
                     write_timeout=WRITE_TIMEOUT_S,
                 ) as port:
                     self.port_name = port_name
-                    LOGGER.info("USB 已连接：%s（推帧 %.1f Hz）", port_name, 1.0 / self._interval_s)
-                    backoff = RECONNECT_INITIAL_S
-                    self._pump(port, port_name)
+                    try:
+                        LOGGER.info("USB 已连接：%s（推帧 %.1f Hz）", port_name, 1.0 / self._interval_s)
+                        backoff = RECONNECT_INITIAL_S
+                        self._pump(port, port_name)
+                    finally:
+                        # 先清状态再退避等待，别让托盘在断线期间还显示「绿」
+                        self.port_name = None
             except (serial.SerialException, OSError) as exc:
                 if self._stop.is_set():
                     break
@@ -108,9 +128,6 @@ class UsbLink:
                 LOGGER.exception("USB 线程未知异常，%.1fs 后重试", backoff)
                 self._stop.wait(backoff)
                 backoff = min(backoff * 2, RECONNECT_MAX_S)
-            finally:
-                if self.port_name == port_name:
-                    self.port_name = None
 
     def _pump(self, port: "serial.Serial", port_name: str) -> None:
         next_send = 0.0
@@ -120,9 +137,15 @@ class UsbLink:
                 snapshot = self._sampler.latest()  # 始终发最新值，不阻塞采集
                 if snapshot is not None:
                     line = (to_json(snapshot) + "\n").encode("utf-8")
-                    port.write(line)
-                    port.flush()
-                    LOGGER.debug("USB → %s：seq=%s，%d 字节", port_name, snapshot.get("seq"), len(line))
+                    try:
+                        port.write(line)
+                        port.flush()
+                        LOGGER.debug("USB → %s：seq=%s，%d 字节", port_name, snapshot.get("seq"), len(line))
+                    except serial.SerialTimeoutException:
+                        # 设备端没在读 CDC 数据时写会超时；这不是拔线，保持连接、下一帧重试
+                        if now - self._last_write_warn >= WRITE_WARN_INTERVAL_S:
+                            self._last_write_warn = now
+                            LOGGER.warning("USB 写入超时（设备端可能没在读 CDC 数据），保持连接并重试")
                 next_send = now + self._interval_s
 
             waiting = getattr(port, "in_waiting", 0)

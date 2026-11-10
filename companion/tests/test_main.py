@@ -29,3 +29,10 @@ def test_no_overrides_keep_config_values():
 def test_interval_has_floor():
     args = build_parser().parse_args(["--interval", "0.01"])
     assert apply_overrides(Config(token="t"), args).interval_s == 0.2
+
+
+def test_no_tray_flag_disables_tray():
+    args = build_parser().parse_args(["--no-tray"])
+    config = apply_overrides(Config(token="t"), args)
+    assert config.tray_enabled is False
+    assert apply_overrides(Config(token="t"), build_parser().parse_args([])).tray_enabled is True

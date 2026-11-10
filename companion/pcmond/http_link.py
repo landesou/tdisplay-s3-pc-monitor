@@ -138,6 +138,11 @@ class HttpLink:
         """实际监听端口（测试用 port=0 时取系统分配值）。"""
         return self._server.server_address[1] if self._server is not None else None
 
+    @property
+    def running(self) -> bool:
+        """HTTP 服务是否真的起来了（托盘状态用）。"""
+        return self._server is not None
+
     def start(self) -> bool:
         try:
             server = _Server((self.host, self.port), build_handler(self._provider, self._token))

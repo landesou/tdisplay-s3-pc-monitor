@@ -54,6 +54,13 @@ def test_wifi_credentials_are_loaded(tmp_path):
     assert config.wifi_pass == "pw"
 
 
+def test_tray_enabled_defaults_true_and_roundtrips(tmp_path):
+    path = tmp_path / "config.json"
+    assert Config.load(path).tray_enabled is True
+    Config(token="t", tray_enabled=False).save(path)
+    assert Config.load(path).tray_enabled is False
+
+
 def test_save_roundtrip(tmp_path):
     path = tmp_path / "sub" / "config.json"
     config = Config(token="tok", port=9999, serial="COM7", wifi_ssid="S")

@@ -119,3 +119,14 @@ def test_port_conflict_returns_false_and_does_not_raise():
         assert second.start() is False  # 端口被占：降级，不崩
     finally:
         first.stop()
+
+
+def test_running_property_tracks_lifecycle():
+    instance = HttpLink(lambda: SNAPSHOT, token=TOKEN, port=0)
+    assert instance.running is False
+    assert instance.start()
+    try:
+        assert instance.running is True
+    finally:
+        instance.stop()
+    assert instance.running is False
