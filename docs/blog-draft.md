@@ -299,11 +299,11 @@ Arduino 配置里 `TFT_RD 9` 是当普通输出脚驱动的。
 都在波动，拿某一秒的屏上数字去比另一秒的 PC 采样必然对不上。改用「人为加压 → 看屏是否同步冲高」
 这种**定性对照**才靠谱，这个经验对以后调监控类项目很有用。
 
-后续计划：① 实机补 WiFi 双模联调（需要凭据）；② 实机压测 USB 长时间稳定性；③ 补点亮照片和外壳；
-④ 把托盘 + 开机自启在真机上复测一遍。
+后续计划：① 实机压测 USB 长时间稳定性；② 补点亮照片和外壳；③ 把开机自启在真机上复测一遍；
+④ WiFi 断线重连与漫游场景。
 
-仓库地址占位：`https://github.com/<your-id>/tdisplay-s3-pc-monitor`（发布时替换；本仓库采用
-**MIT** 许可，版权署名 `T-Display-S3 PC Monitor contributors`）。相关文档：架构与接口契约在
+仓库地址：**<https://github.com/landesou/tdisplay-s3-pc-monitor>**（本仓库采用 **MIT** 许可，
+版权署名 `T-Display-S3 PC Monitor contributors`）。相关文档：架构与接口契约在
 `docs/design/architecture.md`，开发日志在 `docs/journal.md`，上板清单在 `docs/bringup.md`，
 上位机用法在 `companion/README.md`。
 
