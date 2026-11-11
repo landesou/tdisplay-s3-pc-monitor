@@ -2,6 +2,9 @@
 
 > **项目已开源：<https://github.com/landesou/tdisplay-s3-pc-monitor>**
 > 代码、设计文档、踩坑日志都在里面，MIT 协议。本文是完整实现记录。
+>
+> **v1.1 更新**：新增第 3 页「AI 用量」——按一下按键就能看 DeepSeek Harness 的
+> token 消耗与进程状态（含按峰谷价逐条算的 ≈费用），详见 [第十二章](#十二v11-升级按一下按键看ai-用量)。
 
 ![T-Display-S3 性能监控仪表盘实机效果](https://cdn.jsdelivr.net/gh/landesou/tdisplay-s3-pc-monitor@main/docs/images/device-cover.jpg)
 
@@ -344,7 +347,102 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 
 上位机默认 `http://<你的局域网IP>:8787/api/stats`，Bearer Token 在 `~/.tdisplay-pcmon/config.json`。设备侧可以完全不管 WiFi，插上 USB 线就出数；要用 WiFi 就在串口里配一次 `wifi` / `url` / `token`。
 
-## 十二、写在最后
+## 十二、v1.1 升级：按一下按键，看「AI 用量」
+
+项目发出去之后加了一页——因为发现这屏只监控「机器」有点浪费：我自己一天到晚在跟 AI 写代码，
+**花了多少 token、花了多少钱，其实也是"性能指标"**。而 DeepSeek Harness 的本地会话日志里，本来就记着这些。
+
+现在 **KEY 短按循环三页**：P0 总览 → P1 线程明细 → **P2 AI 用量**。
+
+> 📷 第 3 页实机照片待补（发布前替换为你自己的图）
+
+```text
+┌ TOKENS TODAY ─────┐ ┌ ──────── ~CNY 12.97 ┐
+│ 353M              │ │ REQ    1125          │
+│ IN 1.02M  OUT 1.2M│ │ DSH    9 PROC        │
+│ CACHE 351M | 99%  │ │ RSS 1055M  CPU 165%  │
+└───────────────────┘ └──────────────────────┘
+  7D  619M TOK | ~CNY 33.53 | 2381 REQ
+```
+
+### 12.1 数据从哪来
+
+会话日志在 `~/.dsh/sessions/<项目>/<session-xxx>/session.v4.jsonl.zstd`（zstd 压缩的 JSONL）。
+每条 `assistant/message` 记录带一次模型调用的用量：
+
+```json
+{"type":"assistant/message","time":1794306909759,
+ "data":{"usage":{"inputTokens":4553,"outputTokens":1574,
+                  "cacheReadTokens":40704,"cacheWriteTokens":0,"totalTokens":46831},
+         "message":{"source":{"model":"deepseek-flash"}}}}
+```
+
+`time` 是毫秒时间戳、`source.model` 是模型名——**这两样决定了费用能算多准**。
+
+实测性能数据：本机 152 个会话文件共 131 MB，但**24 小时内只有 7 个文件有改动（9.3 MB）**，
+单个解压后 8.1 MB 的会话解析只要 **0.03 秒**。所以按 `(path, mtime, size)` 缓存、只重解析变动的文件，
+开个 5 秒的后台线程刷新，1 Hz 发帧只读缓存——完全无压力。
+
+### 12.2 费用：逐条按时刻判峰谷，而不是"均价 × 总量"
+
+DeepSeek 现在是峰谷定价：**北京时间周一至周五 9:00–12:00、14:00–18:00 为高峰，其余时段空闲，空闲价是高峰的一半**。
+`deepseek-flash` 的高峰价（元 / 百万 tokens）：缓存命中 **0.04**、缓存未命中 **2**、输出 **8**。
+
+所以每条 `assistant/message` 都按**它自己的时间戳**判断当时是峰还是谷，再取对应价格累加：
+
+```
+cost = Σ (in×miss价 + cacheRead×hit价 + cacheWrite×miss价 + out×out价) / 1e6
+```
+
+一个直观结果：晚上跑的大多是空闲半价，**3.5 亿 token 才 12.97 元**。如果按白天的均价一刀切，
+这个数字会错得离谱。这也是这功能里最容易做糙、但最值得做细的地方。
+
+### 12.3 工程上几个决定
+
+- **帧契约加"可选段"**：`dsh` 是可选对象，没有就不发；设备端 `valid=false` 时整页显示 `DSH N/A`。
+  老固件收到新帧会自动忽略，新固件收到老帧也照常工作——两端互不绑定。
+- **`uint64` 防截断**：token 可能很大，解析走 cJSON 的 `valuedouble` 转 `uint64_t`，不用 `valueint`；
+  离线测试里专门塞了一个 `2^40` 的 token 值，防止以后有人"优化"回去。
+- **psutil 的性能坑**：`process_iter(["name","memory_info"])` 在 381 个进程上要 **1.66 秒**（每 5 秒白烧 CPU）；
+  改成先只枚举 name、命中的 DSH 进程再取内存信息 → **0.006 秒**。
+- **契约帧长 600 B → 1 KB**：带 `dsh` 实测 621–752 B，两端缓冲都是 1024 B，超了会整行丢弃。
+
+### 12.4 两个新踩的坑
+
+**坑 A：源码里出现 GBK 编不出的字符，会把构建搞挂——但不是编译错误。**
+
+字体里没有 `≈`(U+2248)、`¥`(U+00A5)、`•`(U+2022) 的字形，我最初在 UI 源码里写了这些字符。
+结果编译器诊断一回显这类字符的源码行，`idf.py` 在 Windows 上按 GBK 写日志就抛 `UnicodeEncodeError`，
+**整个构建挂掉**，报错还看不出和代码有关。现在全部改成 ASCII（费用显示 `~CNY 12.97`），
+并加了个扫描脚本确认固件源码里 0 个这类字符。
+
+**坑 B：页号被 NVS 夹在 0..1。**
+
+页数从 2 增加到 3 之后，键盘切到第 3 页、重启却回到第 2 页——因为 `cfg.c` 里
+`s_page = (page > 1) ? 1 : page;`。**加页数时记得同步改持久化的上限**，这种"两处常量"的坑很典型。
+
+### 12.5 边界（别被数字骗了）
+
+- 只统计**本机 DSH 会话日志**，不含网页版/手机端/其它客户端；
+- 日志写入盘之后才有数，比真实请求晚 **1–2 秒**；
+- 费用是**估算不是账单**：峰谷判断没查中国法定节假日表（只按星期 + 时段简化），价格会变；
+- `CPU 165%` 是**多核累加**（1.65 核），和 `top` 口径一致，不是 bug；
+- 跨零点后「今日」自然归零（次日实测：today 归零、7 天仍计 619M）。
+
+### 12.6 验证结果
+
+| 项 | 结果 |
+|---|---|
+| 固件编译 | 0 error / 0 warning，1.24 MB / 3 MB 分区 61% 余量 |
+| 固件离线测试 | **83 checks / 0 failure**（原 61 + dsh 22，含 int64、老帧兼容、坏文件跳过） |
+| 上位机单测 | **112 passed / 1 skipped**（原 90 无退化） |
+| 数字正确性 | 与「独立解压脚本逐条统计」对账：today 全字段 + week 的 tok/req **完全一致** |
+| 实机 | 第 3 页 KEY 循环可进入，数字随采集刷新 |
+
+一句话总结这次升级：这块屏从「看电脑性能」变成了**「看自己干活花了多少」**——
+对 AI 编码助手重度用户来说，后者可能更该盯。
+
+## 十三、写在最后
 
 这个项目是**边做边记录**的：仓库里的 `docs/journal.md` 把每个决策、每条报错原文、每个"当时为什么这么选"都留着，这篇文章基本是从它摘出来的。好处是写文档时不用凭记忆——报错原文、版本号、测试结果都能直接引用；坏处是日志越写越长，但比起"三个月后想不起来为什么不用另一个方案"，这点长度不算什么。
 
@@ -356,7 +454,7 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 
 **开源地址：<https://github.com/landesou/tdisplay-s3-pc-monitor>**
 
-- 固件：ESP-IDF 5.5.3 + LVGL 9.2.2，i80 并口 ST7789 驱动、两页 UI、USB CDC + WiFi HTTP 双链路
+- 固件：ESP-IDF 5.5.3 + LVGL 9.2.2，i80 并口 ST7789 驱动、三页 UI、USB CDC + WiFi HTTP 双链路
 - 上位机：Python `pcmond`，psutil + pyserial，双传输、开机自启、系统托盘、单测 90 passed
 - 文档：设计契约 `docs/design/architecture.md`、全过程日志 `docs/journal.md`、上板手册 `docs/bringup.md`
 - 许可：MIT
