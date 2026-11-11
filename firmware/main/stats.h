@@ -32,6 +32,12 @@ typedef struct {
     uint16_t proc_rss_mb;
     uint8_t  proc_cpu_pct;
     bool     proc_port_up;     /* 本地 GUI 端口（10899）是否在监听 */
+
+    /* 峰谷时段（v1.2，契约 §2.5 `rate`）。设备**只显示**，不自行推算——规则只在 PC 侧实现一份 */
+    bool     rate_valid;       /* 帧里是否带 rate 段；false = 不显示峰谷徽标 */
+    bool     rate_peak;        /* true = 高峰（贵，×2） */
+    uint8_t  rate_mult;        /* 当前单价倍数：高峰 2、空闲 1 */
+    uint16_t rate_until_min;   /* 距下一次峰↔谷切换还有多少分钟 */
 } dsh_stats_t;
 
 typedef struct {

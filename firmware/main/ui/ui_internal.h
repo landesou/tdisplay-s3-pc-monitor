@@ -30,6 +30,10 @@
 #define UI_COL_LINK_STALE UI_COL_NET
 #define UI_COL_LINK_NONE  UI_COL_DIM
 
+/* ---- 峰谷徽标语义色（DSH 页，task-11）：别在 UI 代码里写魔法值 ---- */
+#define UI_COL_WARN  UI_COL_ALERT /* 告警红：高峰（PEAK x2） */
+#define UI_COL_GOOD  UI_COL_MEM   /* 成功绿（与 MEM 同色）：空闲（OFF x1） */
+
 /* ---- 页面 1（明细页）由 ui_pages.c 实现 ---- */
 /** 在 parent（已定位好的页面容器）里创建全部对象；只调用一次。 */
 void ui_detail_create(lv_obj_t *parent);

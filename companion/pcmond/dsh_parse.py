@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import math
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -47,6 +48,45 @@ def is_peak(epoch_seconds: float) -> bool:
 def local_day(epoch_seconds: float) -> str:
     """按本机本地时区取日期键（YYYY-MM-DD）。"""
     return datetime.fromtimestamp(epoch_seconds).strftime("%Y-%m-%d")
+
+
+def next_rate_boundary(now_epoch: float) -> datetime:
+    """下一次峰↔谷切换时刻（北京时间），与 is_peak() 是同一份规则的补集边界。
+
+    - 工作日高峰 [9:00,12:00) / [14:00,18:00) 内 → 本段结束（12:00 / 18:00）；
+    - 工作日空闲 → 9:00 / 14:00 / 下一个工作日 9:00（周五 18:00 后 → 下周一 9:00）；
+    - 周六/周日整段空闲 → 下周一 9:00；
+    - 简化：不查中国法定节假日表（与 is_peak() 口径一致）。
+    """
+    moment = datetime.fromtimestamp(now_epoch, tz=BEIJING_TZ)
+    weekday = moment.weekday()  # 0 = 周一
+    minutes = moment.hour * 60 + moment.minute
+
+    def boundary_at(hour: int, day_offset: int = 0) -> datetime:
+        target = moment + timedelta(days=day_offset)
+        return target.replace(hour=hour, minute=0, second=0, microsecond=0)
+
+    if weekday >= 5:  # 周六、周日全天空闲 → 下周一 9:00
+        return boundary_at(9, 7 - weekday)
+    if 9 * 60 <= minutes < 12 * 60:  # 上午高峰 → 12:00 转空闲
+        return boundary_at(12)
+    if 14 * 60 <= minutes < 18 * 60:  # 下午高峰 → 18:00 转空闲
+        return boundary_at(18)
+    if minutes < 9 * 60:  # 早晨空闲 → 当天 9:00
+        return boundary_at(9)
+    if 12 * 60 <= minutes < 14 * 60:  # 午休空闲 → 14:00
+        return boundary_at(14)
+    # 工作日 18:00 之后空闲：周一~周四 → 次日 9:00；周五 → 下周一 9:00
+    return boundary_at(9, 1 if weekday < 4 else 3)
+
+
+def build_rate(now_epoch: float) -> Dict[str, Any]:
+    """当前峰谷徽标（契约 §2.5 rate）：peak / mult / until_min（分钟，向上取整）。"""
+    peak = is_peak(now_epoch)
+    boundary = next_rate_boundary(now_epoch)
+    remaining = boundary.timestamp() - now_epoch
+    until_min = 0 if remaining <= 0 else int(math.ceil(remaining / 60.0))
+    return {"peak": peak, "mult": 2 if peak else 1, "until_min": until_min}
 
 
 def as_int(value: Any) -> int:
@@ -162,6 +202,7 @@ def build_payload(
     buckets: Dict[str, Dict[str, float]],
     today: date,
     proc: Dict[str, Any],
+    now_epoch: float,
 ) -> Dict[str, Any]:
     """把按天桶聚合成契约 §2.5 的 dsh 对象（字段名/类型严格按契约）。"""
     today_key = today.isoformat()
@@ -192,4 +233,5 @@ def build_payload(
             "cost": round(week_bucket["cost"], 2),
         },
         "proc": proc,
+        "rate": build_rate(now_epoch),
     }

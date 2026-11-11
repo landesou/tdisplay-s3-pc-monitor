@@ -5,7 +5,7 @@
  * 目的：板子没插电脑时 USB/WiFi 传输验证不了，但「新鲜度状态机 + JSON 解析」这两块
  *       纯逻辑可以在主机上真跑一遍，比"看着像对"强得多。
  *
- * 覆盖（共 83 条断言）：
+ * 覆盖（共 100 条断言）：
  *   [1] 状态机全部迁移 —— INIT 丢帧 / boot_done / NO_LINK / USB 与 WiFi 进在线 /
  *       3 个 tick 转 STALE(age=3) / USB 优先抢占 / WiFi 帧在 USB 在线时被忽略 /
  *       link_lost 回 NO_LINK / SLEEP 终态吃帧不动
@@ -15,7 +15,9 @@
  *   [3] 解析边界：gpu:null、cpu.avg:null、cores 40 个截到 32、越界占用率夹到 0..100、
  *       截断 JSON / 数组 / 空输入全部拒收
  *   [4] 解析 dsh 段（frame_dsh.json，契约 §2.5）：today/week/proc 各字段数值、
- *       int64 token 不被截断（> 2^32 的值必须原样）、port_up 布尔、费用浮点误差
+ *       int64 token 不被截断（> 2^32 的值必须原样）、port_up 布尔、费用浮点误差；
+ *       rate 段（v1.2）：peak/mult/until_min 数值、dsh 在但 rate 缺失时 rate_valid=false、
+ *       mult/until_min 越界夹取
  *
  * 构建/运行：bash firmware/test/host_link/run.sh
  */
@@ -350,6 +352,12 @@ static void test_parse_dsh(const char *frame_path)
     CHECK(s.dsh.proc_rss_mb == 906U, "proc.rss_mb = %u", s.dsh.proc_rss_mb);
     CHECK(s.dsh.proc_cpu_pct == 12U, "proc.cpu_pct = %u", s.dsh.proc_cpu_pct);
     CHECK(s.dsh.proc_port_up == true, "proc.port_up = %s", s.dsh.proc_port_up ? "true" : "false");
+    /* rate 段（v1.2 峰谷）：fixture 里是 {"peak":false,"mult":1,"until_min":151} */
+    CHECK(s.dsh.rate_valid, "rate.valid == true when rate section present");
+    CHECK(s.dsh.rate_peak == false, "rate.peak = %s (want false = idle)",
+          s.dsh.rate_peak ? "true" : "false");
+    CHECK(s.dsh.rate_mult == 1U, "rate.mult = %u (want 1 = idle)", s.dsh.rate_mult);
+    CHECK(s.dsh.rate_until_min == 151U, "rate.until_min = %u", s.dsh.rate_until_min);
     CHECK(s.n_cores == 24, "performance fields unaffected (n_cores = %d)", s.n_cores);
     free(json);
 
@@ -367,6 +375,36 @@ static void test_parse_dsh(const char *frame_path)
           s.dsh.proc_port_up ? "true" : "false");
     CHECK(s.dsh.week_tok == 0ULL, "missing dsh fields default to 0 (week.tok = %.0f)",
           (double)s.dsh.week_tok);
+    /* 这一帧有 dsh、有 today/proc，但**没有 rate**：两者独立，dsh.valid 仍为 true */
+    CHECK(s.dsh.valid, "dsh.valid stays true without rate");
+    CHECK(!s.dsh.rate_valid, "dsh without rate -> rate_valid == false");
+
+    /* rate 段边界 1：高峰、mult=2、until_min=0 */
+    const char *rate_peak =
+        "{\"v\":1,\"seq\":8,\"dsh\":{\"rate\":{\"peak\":true,\"mult\":2,\"until_min\":0}}}";
+    ok = link_parse_frame(rate_peak, strlen(rate_peak), &s);
+    CHECK(ok && s.dsh.rate_valid, "rate:peak=true parses");
+    CHECK(s.dsh.rate_peak == true, "rate.peak = true");
+    CHECK(s.dsh.rate_mult == 2U, "rate.mult = %u (peak)", s.dsh.rate_mult);
+    CHECK(s.dsh.rate_until_min == 0U, "rate.until_min = %u", s.dsh.rate_until_min);
+
+    /* rate 段边界 2：mult=0（没给）→ 当空闲 1；until_min 负数 → 0 */
+    const char *rate_zero =
+        "{\"v\":1,\"seq\":9,\"dsh\":{\"rate\":{\"peak\":false,\"mult\":0,\"until_min\":-5}}}";
+    ok = link_parse_frame(rate_zero, strlen(rate_zero), &s);
+    CHECK(ok && s.dsh.rate_valid, "rate with out-of-range values still parses");
+    CHECK(s.dsh.rate_mult == 1U, "mult 0 -> clamped to 1 (idle), got %u", s.dsh.rate_mult);
+    CHECK(s.dsh.rate_until_min == 0U, "until_min -5 -> clamped to 0, got %u", s.dsh.rate_until_min);
+
+    /* rate 段边界 3：mult=5 → 2；until_min=70000 → 65535；缺 peak → false */
+    const char *rate_big =
+        "{\"v\":1,\"seq\":10,\"dsh\":{\"rate\":{\"mult\":5,\"until_min\":70000}}}";
+    ok = link_parse_frame(rate_big, strlen(rate_big), &s);
+    CHECK(ok, "rate with huge values parses");
+    CHECK(s.dsh.rate_mult == 2U, "mult 5 -> clamped to 2, got %u", s.dsh.rate_mult);
+    CHECK(s.dsh.rate_until_min == 65535U, "until_min 70000 -> clamped to 65535, got %u",
+          s.dsh.rate_until_min);
+    CHECK(s.dsh.rate_peak == false, "missing rate.peak -> false");
 }
 
 int main(int argc, char **argv)

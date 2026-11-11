@@ -156,7 +156,7 @@ class DshSampler:
 
         payload: Optional[Dict[str, Any]] = None
         if buckets:
-            payload = build_payload(buckets, today, self._collect_proc())
+            payload = build_payload(buckets, today, self._collect_proc(), now)
         else:
             LOGGER.debug("DSH：近 %d 天没有可用 token 记录，本帧不带 dsh 字段", WEEK_DAYS)
         with self._lock:

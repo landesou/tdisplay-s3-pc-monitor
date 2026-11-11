@@ -242,6 +242,22 @@ bool link_parse_frame(const char *json, size_t len, stats_t *out)
                 d->proc_cpu_pct = (uint8_t)j_u32(proc, "cpu_pct", 100);
                 d->proc_port_up = cJSON_IsTrue(obj_item(proc, "port_up"));
             }
+
+            /* rate 段（v1.2，峰谷时段，契约 §2.5）：设备**只显示**，规则只在 PC 侧实现一份。
+             * 与 dsh.valid 独立：dsh 存在但没有 rate 时 rate_valid=false，其它字段照旧可用。 */
+            const cJSON *rate = obj_item(dsh, "rate");
+            if (cJSON_IsObject(rate)) {
+                d->rate_valid = true;
+                d->rate_peak = cJSON_IsTrue(obj_item(rate, "peak"));
+
+                /* mult：契约只允许 1（空闲）/ 2（高峰）。越界一律夹取——
+                 * j_u32(...,2) 把 >2 钳到 2、负数/缺失给 0；0 视作"没给"，按空闲的 1 处理。 */
+                uint32_t mult = j_u32(rate, "mult", 2);
+                d->rate_mult = (uint8_t)(mult < 1 ? 1 : mult);
+
+                /* until_min：距下次峰↔谷切换的分钟数，>=0；负数/缺失 → 0，超 uint16 上界 → 65535 */
+                d->rate_until_min = (uint16_t)j_u32(rate, "until_min", UINT16_MAX);
+            }
         }
     }
 

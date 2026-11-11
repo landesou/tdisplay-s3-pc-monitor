@@ -16,6 +16,7 @@
 #include "lvgl_port.h"
 #include "ui.h"
 #include "ui_internal.h"
+#include "ui_icons.h" /* 自动生成的 12x12 A8 箭头位图（别改那个文件） */
 
 #define DETAIL_BARS     24
 #define DETAIL_BAR_W    11
@@ -203,6 +204,13 @@ static lv_obj_t *s_dsh_proc;   /* "10 PROC" */
 static lv_obj_t *s_dsh_rss;    /* "RSS 906M  CPU 12%" */
 static lv_obj_t *s_dsh_week;   /* 底部 7 天汇总 */
 
+/* ---- 峰谷徽标（task-11）：箭头位图 + PEAK/OFF 文字 + 切换倒计时 ----
+ * 三重编码：箭头形状（上=峰 / 下=谷）+ 文字（PEAK/OFF）+ 颜色，不只靠颜色区分；
+ * rate 段缺失时三个对象一起隐藏（不显示 0 或占位符）。 */
+static lv_obj_t *s_dsh_arrow;  /* 12x12 A8 箭头，用 image_recolor 上色 */
+static lv_obj_t *s_dsh_rate;   /* "PEAK x2" / "OFF x1" */
+static lv_obj_t *s_dsh_until;  /* "2h31m" / "42m" / "now" */
+
 /* token 自动缩单位：<1000 原数；<1e6 用 K；否则 M。
  * 小数位：K 最多 1 位、M 最多 2 位，末尾的 0 去掉（620K 比 620.0K 省横向空间）。
  * 全部用整数运算：用 %f 的话 GCC 的 -Wformat-truncation 会按 double 的极端量级
@@ -244,6 +252,26 @@ static void fmt_cost(float cost, char *buf, size_t len)
     snprintf(buf, len, "~CNY %lu.%02lu", cents / 100UL, cents % 100UL);
 }
 
+/* 14 号字下这段文字的像素宽（徽标整体右对齐用；不依赖 LVGL 布局是否已刷新） */
+static int32_t text_w14(const char *txt)
+{
+    lv_point_t sz;
+    lv_text_get_size(&sz, txt, &lv_font_montserrat_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return sz.x;
+}
+
+/* 距下次峰谷切换的倒计时：0 -> "now"；>=60 分钟 -> "XhYYm"；否则 "Ym" */
+static void fmt_until(uint16_t until_min, char *buf, size_t len)
+{
+    if (until_min == 0) {
+        snprintf(buf, len, "now");
+    } else if (until_min >= 60) {
+        snprintf(buf, len, "%uh%02um", (unsigned)(until_min / 60), (unsigned)(until_min % 60));
+    } else {
+        snprintf(buf, len, "%um", (unsigned)until_min);
+    }
+}
+
 void ui_dsh_create(lv_obj_t *parent)
 {
     /* ---- 左卡：今日 tokens ---- */
@@ -253,17 +281,33 @@ void ui_dsh_create(lv_obj_t *parent)
     s_dsh_inout = ui_tag(s_dsh_left, &lv_font_montserrat_14, UI_COL_MUTED, 8, 60, "IN --  OUT --");
     s_dsh_cache = ui_tag(s_dsh_left, &lv_font_montserrat_14, UI_COL_MUTED, 8, 80, "CACHE --");
 
-    /* ---- 右卡：费用 / 请求数 / DSH 进程 ---- */
+    /* ---- 右卡：费用 / 峰谷徽标 / 请求数 / DSH 进程 ----
+     * 行高（Montserrat：14 号 16px、20 号 22px）：
+     *   费用 2..24 | 徽标 26..42 | REQ 44..66 | DSH 68..84 | RSS 86..102（卡高 108） */
     s_dsh_right = ui_card(parent, 158, 2, 158, 108);
     s_dsh_cost = ui_tag(s_dsh_right, &lv_font_montserrat_20, UI_COL_NET, 0, 0, "--");
     lv_obj_align(s_dsh_cost, LV_ALIGN_TOP_RIGHT, -8, 2);
-    ui_tag(s_dsh_right, &lv_font_montserrat_14, UI_COL_MUTED, 8, 32, "REQ");
+
+    /* 峰谷徽标：紧贴费用行下方，总高 16px。右对齐位置在 update 里按 14 号字实测宽度算，
+     * 这里只是创建时的初始坐标（第一次 update 之前三件套都隐藏）。 */
+    s_dsh_arrow = lv_image_create(s_dsh_right);
+    lv_image_set_src(s_dsh_arrow, &ui_icon_arrow_up_dsc);
+    lv_obj_set_pos(s_dsh_arrow, 8, 28);
+    lv_obj_set_style_image_recolor(s_dsh_arrow, lv_color_hex(UI_COL_WARN), LV_PART_MAIN);
+    lv_obj_set_style_image_recolor_opa(s_dsh_arrow, LV_OPA_COVER, LV_PART_MAIN);
+    s_dsh_rate = ui_tag(s_dsh_right, &lv_font_montserrat_14, UI_COL_WARN, 8, 26, "PEAK x2");
+    s_dsh_until = ui_tag(s_dsh_right, &lv_font_montserrat_14, UI_COL_MUTED, 8, 26, "now");
+    lv_obj_add_flag(s_dsh_arrow, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_dsh_rate, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_dsh_until, LV_OBJ_FLAG_HIDDEN);
+
+    ui_tag(s_dsh_right, &lv_font_montserrat_14, UI_COL_MUTED, 8, 46, "REQ");
     s_dsh_req = ui_tag(s_dsh_right, &lv_font_montserrat_20, UI_COL_CPU, 0, 0, "--");
-    lv_obj_align(s_dsh_req, LV_ALIGN_TOP_RIGHT, -8, 28);
-    ui_tag(s_dsh_right, &lv_font_montserrat_14, UI_COL_MUTED, 8, 56, "DSH");
+    lv_obj_align(s_dsh_req, LV_ALIGN_TOP_RIGHT, -8, 44);
+    ui_tag(s_dsh_right, &lv_font_montserrat_14, UI_COL_MUTED, 8, 68, "DSH");
     s_dsh_proc = ui_tag(s_dsh_right, &lv_font_montserrat_14, UI_COL_CPU, 0, 0, "--");
-    lv_obj_align(s_dsh_proc, LV_ALIGN_TOP_RIGHT, -8, 56);
-    s_dsh_rss = ui_tag(s_dsh_right, &lv_font_montserrat_14, UI_COL_MUTED, 8, 80, "--");
+    lv_obj_align(s_dsh_proc, LV_ALIGN_TOP_RIGHT, -8, 68);
+    s_dsh_rss = ui_tag(s_dsh_right, &lv_font_montserrat_14, UI_COL_MUTED, 8, 86, "--");
 
     /* ---- 底部条：近 7 天滚动 ---- */
     s_dsh_bottom = ui_card(parent, 4, 112, 312, 36);
@@ -286,6 +330,10 @@ void ui_dsh_update(const stats_t *s, bool stale)
         lv_obj_add_flag(s_dsh_right, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_dsh_bottom, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_dsh_na, LV_OBJ_FLAG_HIDDEN);
+        /* 徽标三件套也收掉：避免从"有 rate"切到"无 dsh"时状态残留 */
+        lv_obj_add_flag(s_dsh_arrow, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_dsh_rate, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_dsh_until, LV_OBJ_FLAG_HIDDEN);
         return;
     }
 
@@ -345,6 +393,54 @@ void ui_dsh_update(const stats_t *s, bool stale)
                      (unsigned)d->proc_rss_mb, (unsigned)d->proc_cpu_pct);
         }
         lv_label_set_text(s_dsh_rss, sub);
+    }
+
+    /* ---- 峰谷徽标（三重编码）：rate 段缺失就三件套整体隐藏，不留 0/占位 ---- */
+    if (!d->rate_valid) {
+        lv_obj_add_flag(s_dsh_arrow, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_dsh_rate, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_dsh_until, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        /* 倍数兜底：rate_mult 缺失（0）时按峰谷语义取 2/1，不能显示 x0 */
+        unsigned mult = d->rate_mult ? (unsigned)d->rate_mult : (d->rate_peak ? 2u : 1u);
+        uint32_t color = d->rate_peak ? UI_COL_WARN : UI_COL_GOOD;
+        char rate_txt[24];
+        char until[24];
+
+        if (d->rate_peak) {
+            snprintf(rate_txt, sizeof(rate_txt), "PEAK x%u", mult);
+        } else {
+            snprintf(rate_txt, sizeof(rate_txt), "OFF x%u", mult);
+        }
+        fmt_until(d->rate_until_min, until, sizeof(until));
+
+        /* 箭头形状本身也是信息：峰=向上箭头，谷=向下箭头，不只靠颜色 */
+        lv_image_set_src(s_dsh_arrow,
+                         d->rate_peak ? &ui_icon_arrow_up_dsc : &ui_icon_arrow_down_dsc);
+        lv_obj_set_style_image_recolor(s_dsh_arrow, lv_color_hex(stale ? UI_COL_DIM : color),
+                                       LV_PART_MAIN);
+        lv_label_set_text(s_dsh_rate, rate_txt);
+        ui_text_color(s_dsh_rate, color, stale);
+        lv_label_set_text(s_dsh_until, until);
+        ui_text_color(s_dsh_until, UI_COL_MUTED, stale);
+
+        /* 整体右对齐：倒计时贴卡片右边界，文字在左，箭头再往左 */
+        const int32_t right = 158 - 8; /* 卡片宽 - 右侧内边距 */
+        int32_t cd_w = text_w14(until);
+        int32_t tx_w = text_w14(rate_txt);
+        int32_t x_cd = right - cd_w;
+        int32_t x_tx = x_cd - 4 - tx_w;
+        int32_t x_img = x_tx - 2 - 12;
+        if (x_img < 8) {
+            x_img = 8; /* 兜底：别跑出卡片左边界 */
+        }
+        lv_obj_set_pos(s_dsh_until, x_cd, 26);
+        lv_obj_set_pos(s_dsh_rate, x_tx, 26);
+        lv_obj_set_pos(s_dsh_arrow, x_img, 28);
+
+        lv_obj_remove_flag(s_dsh_arrow, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_dsh_rate, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_dsh_until, LV_OBJ_FLAG_HIDDEN);
     }
 
     /* ---- 底部条：近 7 天滚动（费用同样按估算标 ~） ---- */

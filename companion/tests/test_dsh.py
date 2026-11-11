@@ -13,14 +13,14 @@ import zstandard
 
 from pcmond import dsh
 from pcmond.dsh import DshSampler
-from pcmond.dsh_parse import is_peak, local_day
+from pcmond.dsh_parse import build_rate, is_peak, local_day, next_rate_boundary
 
 BEIJING = timezone(timedelta(hours=8))
 NOW = datetime(2026, 11, 10, 20, 0, tzinfo=BEIJING).timestamp()  # 周二 20:00（空闲时段）
 
 
-def at(year: int, month: int, day: int, hour: int, minute: int = 0) -> float:
-    return datetime(year, month, day, hour, minute, tzinfo=BEIJING).timestamp()
+def at(year: int, month: int, day: int, hour: int, minute: int = 0, second: int = 0) -> float:
+    return datetime(year, month, day, hour, minute, second, tzinfo=BEIJING).timestamp()
 
 
 def ms(year: int, month: int, day: int, hour: int, minute: int = 0) -> int:
@@ -107,6 +107,80 @@ def test_is_peak_beijing_weekday_boundaries():
 
 def test_local_day_matches_local_timezone():
     assert local_day(NOW) == datetime.fromtimestamp(NOW).strftime("%Y-%m-%d")
+
+
+# ---------------------------------------------------------------- rate 峰谷徽标
+
+
+def rate_at(year: int, month: int, day: int, hour: int, minute: int = 0, second: int = 0) -> dict:
+    return build_rate(at(year, month, day, hour, minute, second))
+
+
+def test_rate_monday_daily_cycle():
+    # 2026-11-09 是周一
+    assert rate_at(2026, 11, 9, 8, 59) == {"peak": False, "mult": 1, "until_min": 1}
+    assert rate_at(2026, 11, 9, 9, 0) == {"peak": True, "mult": 2, "until_min": 180}
+    assert rate_at(2026, 11, 9, 11, 59) == {"peak": True, "mult": 2, "until_min": 1}
+    assert rate_at(2026, 11, 9, 12, 0) == {"peak": False, "mult": 1, "until_min": 120}
+    assert rate_at(2026, 11, 9, 13, 59) == {"peak": False, "mult": 1, "until_min": 1}
+    assert rate_at(2026, 11, 9, 14, 0) == {"peak": True, "mult": 2, "until_min": 240}
+    assert rate_at(2026, 11, 9, 17, 59) == {"peak": True, "mult": 2, "until_min": 1}
+    assert rate_at(2026, 11, 9, 18, 0) == {"peak": False, "mult": 1, "until_min": 900}  # 次日 09:00
+
+
+def test_rate_until_min_rounds_up():
+    # 11:59:30 → 还差 30 s 到 12:00，向上取整 = 1 分钟
+    assert rate_at(2026, 11, 9, 11, 59, 30)["until_min"] == 1
+    assert rate_at(2026, 11, 9, 8, 59, 30)["until_min"] == 1
+    # 09:59:01 → 还差 2h0m59s → ceil = 121
+    assert rate_at(2026, 11, 9, 9, 59, 1)["until_min"] == 121
+
+
+def test_rate_friday_evening_goes_to_monday():
+    # 2026-11-13 周五
+    assert rate_at(2026, 11, 13, 17, 59) == {"peak": True, "mult": 2, "until_min": 1}
+    assert rate_at(2026, 11, 13, 18, 0) == {"peak": False, "mult": 1, "until_min": 3780}  # 下周一 09:00
+    assert rate_at(2026, 11, 13, 23, 59) == {"peak": False, "mult": 1, "until_min": 3421}  # 57h1m
+
+
+def test_rate_weekend_goes_to_monday():
+    # 周六 12:00 → 下周一 09:00 = 45h = 2700 分钟
+    assert rate_at(2026, 11, 14, 12, 0) == {"peak": False, "mult": 1, "until_min": 2700}
+    # 周日 23:59 → 下周一 09:00 = 9h1m = 541 分钟
+    assert rate_at(2026, 11, 15, 23, 59) == {"peak": False, "mult": 1, "until_min": 541}
+
+
+def test_next_rate_boundary_datetimes():
+    assert next_rate_boundary(at(2026, 11, 9, 10, 0)) == datetime(2026, 11, 9, 12, 0, tzinfo=BEIJING)
+    assert next_rate_boundary(at(2026, 11, 9, 18, 0)) == datetime(2026, 11, 10, 9, 0, tzinfo=BEIJING)
+    assert next_rate_boundary(at(2026, 11, 13, 18, 0)) == datetime(2026, 11, 16, 9, 0, tzinfo=BEIJING)
+    assert next_rate_boundary(at(2026, 11, 14, 12, 0)) == datetime(2026, 11, 16, 9, 0, tzinfo=BEIJING)
+    assert next_rate_boundary(at(2026, 11, 15, 23, 59)) == datetime(2026, 11, 16, 9, 0, tzinfo=BEIJING)
+
+
+def test_rate_boundary_always_flips_peak():
+    """边界必须严格在未来，且边界时刻的峰谷与当前相反（与 is_peak 同一套规则）。"""
+    samples = [
+        at(2026, 11, 9, hour, minute)
+        for hour in (0, 8, 9, 11, 12, 13, 14, 17, 18, 23)
+        for minute in (0, 30, 59)
+    ] + [
+        at(2026, 11, 13, 18, 0),
+        at(2026, 11, 14, 0, 0),
+        at(2026, 11, 15, 23, 59, 30),
+    ]
+    for now in samples:
+        boundary = next_rate_boundary(now)
+        assert boundary.timestamp() > now
+        assert is_peak(boundary.timestamp()) != is_peak(now)
+
+
+def test_rate_is_in_payload(tmp_path, monkeypatch):
+    root = tmp_path / "sessions"
+    write_session(root, "p/s/session.v4.jsonl.zstd", [record(ms(2026, 11, 10, 20, 0), inp=1000)], mtime=NOW - 10)
+    payload = make_sampler(tmp_path, monkeypatch).refresh(now=NOW)  # 周二 20:00
+    assert set(payload) == {"today", "week", "proc", "rate"}
+    assert payload["rate"] == {"peak": False, "mult": 1, "until_min": 780}  # 到次日 09:00
 
 
 # ---------------------------------------------------------------- 聚合
