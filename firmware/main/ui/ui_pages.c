@@ -97,7 +97,7 @@ void ui_detail_create(lv_obj_t *parent)
 
     /* 底部两行：磁盘 R/W + 显存 / 温度 + 开机时长 + LVGL 帧率 */
     s_line1 = ui_tag(parent, &lv_font_montserrat_14, UI_COL_MUTED, 6, 104, "DISK --  VRAM --/-- MB");
-    s_line2 = ui_tag(parent, &lv_font_montserrat_14, UI_COL_MUTED, 6, 124, "T --  UP --  FPS --");
+    s_line2 = ui_tag(parent, &lv_font_montserrat_14, UI_COL_MUTED, 6, 124, "T --  UP --  SEQ --");
 }
 
 void ui_detail_update(const stats_t *s, bool stale)
@@ -112,7 +112,7 @@ void ui_detail_update(const stats_t *s, bool stale)
             set_fill(i, 0, true, false);
         }
         lv_label_set_text(s_line1, "DISK --  VRAM --/-- MB");
-        lv_label_set_text(s_line2, "T --  UP --  FPS --");
+        lv_label_set_text(s_line2, "T --  UP --  SEQ --");
         return;
     }
 
@@ -154,10 +154,13 @@ void ui_detail_update(const stats_t *s, bool stale)
     fmt_uptime(s->uptime_s, up, sizeof(up));
 
     char line2[64];
+    /* 第三列显示帧号（seq）而不是 FPS：
+     * LVGL 是事件驱动的，1 Hz 数据更新下平均刷新率本来就≈0~1，显示 FPS 只会误导；
+     * 帧号能直接看出有没有丢帧（PC 端单调递增）。 */
     if (temp >= 0) {
-        snprintf(line2, sizeof(line2), "T %dC  UP %s  FPS %u", temp, up, (unsigned)lvgl_port_fps());
+        snprintf(line2, sizeof(line2), "T %dC  UP %s  SEQ %u", temp, up, (unsigned)s->seq);
     } else {
-        snprintf(line2, sizeof(line2), "T --  UP %s  FPS %u", up, (unsigned)lvgl_port_fps());
+        snprintf(line2, sizeof(line2), "T --  UP %s  SEQ %u", up, (unsigned)s->seq);
     }
     lv_label_set_text(s_line2, line2);
 }

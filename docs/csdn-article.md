@@ -3,12 +3,17 @@
 > **项目已开源：<https://github.com/landesou/tdisplay-s3-pc-monitor>**
 > 代码、设计文档、踩坑日志都在里面，MIT 协议。本文是完整实现记录。
 >
-> **v1.1 更新**：新增第 3 页「AI 用量」——按一下按键就能看 DeepSeek Harness 的
-> token 消耗与进程状态（含按峰谷价逐条算的 ≈费用），详见 [第十二章](#十二v11-升级按一下按键看ai-用量)。
+**这块屏做出来后是三个页面，KEY 键短按循环：**
 
-![T-Display-S3 性能监控仪表盘实机效果](https://cdn.jsdelivr.net/gh/landesou/tdisplay-s3-pc-monitor@main/docs/images/device-cover.jpg)
+| 页 | 看什么 |
+|---|---|
+| P0 总览 | CPU / GPU / 内存 / 网速 + 60 点历史曲线 |
+| P1 线程 | 24 线程占用柱状图 + 磁盘、显存、温度、开机时长、帧号 |
+| P2 **AI 用量** | DeepSeek Harness 的今日/近 7 天 token 消耗、≈费用、请求数、进程状态 |
 
-> 屏上实时显示：GPU 占用/温度/功耗、内存、网速、CPU 占用/频率 + 60 点历史曲线。
+![T-Display-S3 性能监控仪表盘实机（第 1 页）](https://cdn.jsdelivr.net/gh/landesou/tdisplay-s3-pc-monitor@main/docs/images/device-cover.jpg)
+
+> 第 1 页：GPU 占用/温度/功耗、内存、网速、CPU 占用/频率 + 60 点历史曲线。第 2、3 页见第十、十二章。
 
 ---
 
@@ -297,11 +302,21 @@ gpio_set_level(BOARD_LCD_RD, 1);            /* RD 高 = 非读状态 */
 
 ## 十、实机验证结果
 
+**第 1 页（总览）实机：**
+
 ![T-Display-S3 性能监控仪表盘实机](https://cdn.jsdelivr.net/gh/landesou/tdisplay-s3-pc-monitor@main/docs/images/device.jpg)
 
-> 实机照片：亚克力外壳是成品自带的。拍这张时链路走的是 Wi-Fi——顶栏右侧绿点是状态灯，
+> 亚克力外壳是成品自带的。拍这张时链路走的是 Wi-Fi——顶栏右侧绿点是状态灯，
 > `WIFI 0s` 表示「Wi-Fi 在线、距上一帧 0 秒」；GPU 卡片的 74 °C / 41 W 来自 `nvidia-smi`，
 > 右下角是 60 点历史曲线。
+
+**第 2 页（24 线程 + 明细）实机：**
+
+![T-Display-S3 第 2 页：24 线程占用与明细](https://cdn.jsdelivr.net/gh/landesou/tdisplay-s3-pc-monitor@main/docs/images/device-threads.jpg)
+
+> 顶栏 `2/3` 是页码；柱状图是 24 个逻辑线程的实时占用，下面两行是磁盘读写、显存占用、
+> GPU 温度、开机时长和帧号（`SEQ` —— 早先这里放的是 FPS，但 LVGL 是事件驱动的、
+> 1 Hz 更新下平均刷新率本来就≈0~1，显示 FPS 只会误导，换成了能看出丢帧的帧号）。
 
 **已实机验证（2026-11-10）**
 
@@ -318,7 +333,8 @@ gpio_set_level(BOARD_LCD_RD, 1);            /* RD 高 = 非读状态 */
 - **CPU 温度**：Intel 14 代 HX 需要 MSR / 内核驱动，读不到，界面显示 `--`，v1 不承诺（GPU 温度是有的，来自 `nvidia-smi`）。
 - **实际帧率 / 刷新率**：没测，不写估算值。
 - **长时间稳定性**：1 Hz 连续推帧的长时丢帧率、内存稳定性没压测（只验证了短时 `seq` 连续）。
-- **NVS 持久化 / 深睡 / 第二页切页交互**：没逐项实测。
+- **NVS 持久化 / 深睡 / 三页切换的长时行为**：三页均已实机确认可切换，但「重启后停在第 3 页」
+  这类持久化细节没逐项实测。
 - **WiFi 断线重连 / 漫游**：只验证了"连上 AP + 正常轮询"，没测路由器重启、信号劣化、跨 AP 漫游。
 
 **顺带记一条被证伪的怀疑**：一开始以为"屏上数字和 PC 对不上"，其实是对比时刻不同——CPU/GPU 每秒都在波动，拿某一秒的屏上数字去比另一秒的 PC 采样必然对不上。改用"人为加压 → 看屏是否同步冲高"这种**定性对照**才靠谱。
@@ -347,14 +363,17 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 
 上位机默认 `http://<你的局域网IP>:8787/api/stats`，Bearer Token 在 `~/.tdisplay-pcmon/config.json`。设备侧可以完全不管 WiFi，插上 USB 线就出数；要用 WiFi 就在串口里配一次 `wifi` / `url` / `token`。
 
-## 十二、v1.1 升级：按一下按键，看「AI 用量」
+## 十二、再加一页：按一下按键，看「AI 用量」
 
-项目发出去之后加了一页——因为发现这屏只监控「机器」有点浪费：我自己一天到晚在跟 AI 写代码，
+前两页做完之后，我又加了一页——因为发现这屏只监控「机器」有点浪费：我自己一天到晚在跟 AI 写代码，
 **花了多少 token、花了多少钱，其实也是"性能指标"**。而 DeepSeek Harness 的本地会话日志里，本来就记着这些。
 
 现在 **KEY 短按循环三页**：P0 总览 → P1 线程明细 → **P2 AI 用量**。
 
-> 📷 第 3 页实机照片待补（发布前替换为你自己的图）
+![第 3 页：AI 用量实机](https://cdn.jsdelivr.net/gh/landesou/tdisplay-s3-pc-monitor@main/docs/images/device-dsh.jpg)
+
+> 顶栏 `3/3` 是页码、`USB 1s` 表示链路与帧龄；左卡是今日 token（8.66M，缓存命中 99%），
+> 右卡是 ≈费用、请求数、DSH 进程数与内存，底部是近 7 天汇总。
 
 ```text
 ┌ TOKENS TODAY ─────┐ ┌ ──────── ~CNY 12.97 ┐

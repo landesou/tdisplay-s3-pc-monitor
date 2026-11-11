@@ -59,7 +59,11 @@ PAGE 1/3                                       uptime 3d 04h
 状态灯含义：USB 帧新鲜 = 在线；USB 断但 Wi-Fi 有帧 = 走 Wi-Fi；**3 秒没有新帧 = `STALE`**，
 界面标灰（原则：绝不在旧数据上显示「在线」）。
 
-> 第 2 页（24 线程柱 + 明细）与第 3 页（DSH 用量）见下文；第 3 页已实机确认（KEY 连按两次可见）。
+第 2 页（24 线程柱 + 磁盘/显存/温度/开机时长）实机：
+
+![第 2 页：24 线程占用实机](docs/images/device-threads.jpg)
+
+> 第 3 页（AI 用量）见下文「第 3 页：DSH 页」，三页均已在实机上确认（KEY 短按循环）。
 
 ---
 
@@ -255,6 +259,9 @@ powershell -ExecutionPolicy Bypass -File .\uninstall_startup.ps1
 
 按一下 **KEY**（短按循环三页）就能看到本机 DeepSeek Harness 的消耗——这一页是给"正在用 AI 写代码的人"
 自己看的，不是通用指标：
+
+![第 3 页：AI 用量实机](docs/images/device-dsh.jpg)
+
 
 ```text
 ┌ TOKENS TODAY ─────┐ ┌ ──────── ~CNY 12.97 ┐
