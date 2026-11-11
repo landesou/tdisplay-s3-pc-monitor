@@ -83,5 +83,6 @@ echo "build    : $BUILD_DIR"
     -o "$EXE" -lm
 
 # ---------- 4. 跑 ----------
+# argv[1] = 老帧（无 dsh，测兼容）；argv[2] = 带 dsh 的帧（测新段解析）
 cd "$BUILD_DIR"
-exec "./$(basename "$EXE")" "$SCRIPT_DIR/frame.json"
+exec "./$(basename "$EXE")" "$SCRIPT_DIR/frame.json" "$SCRIPT_DIR/frame_dsh.json"

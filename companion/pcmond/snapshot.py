@@ -40,9 +40,18 @@ def _gpu_payload(sample: Optional[GpuSample]) -> Optional[Dict[str, Any]]:
     }
 
 
-def build_snapshot(sample: RawSample, seq: int, now: Optional[float] = None) -> Dict[str, Any]:
-    """把一次采集结果组装成契约帧（dict）。seq 由调用方单调递增。"""
-    return {
+def build_snapshot(
+    sample: RawSample,
+    seq: int,
+    now: Optional[float] = None,
+    dsh: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """把一次采集结果组装成契约帧（dict）。seq 由调用方单调递增。
+
+    `dsh`：契约 §2.5 的可选对象；传 None 时**不发**该字段（设备显示 `--`），
+    避免在没有 DSH 数据时塞一堆 0。
+    """
+    snapshot: Dict[str, Any] = {
         "v": PROTOCOL_VERSION,
         "seq": int(seq),
         "t": int(time.time() if now is None else now),
@@ -63,6 +72,9 @@ def build_snapshot(sample: RawSample, seq: int, now: Optional[float] = None) -> 
         "net": {"down": _round2(sample.net_down), "up": _round2(sample.net_up)},
         "disk": {"read": _round2(sample.disk_read), "write": _round2(sample.disk_write)},
     }
+    if dsh is not None:
+        snapshot["dsh"] = dsh
+    return snapshot
 
 
 def to_json(snapshot: Dict[str, Any]) -> str:

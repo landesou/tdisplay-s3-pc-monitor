@@ -36,9 +36,21 @@ void ui_detail_create(lv_obj_t *parent);
 /** 更新明细页数值；s == NULL 表示还没有任何数据；stale 时全部降饱和。 */
 void ui_detail_update(const stats_t *s, bool stale);
 
+/* ---- 页面 2（DSH 页）由 ui_pages.c 实现 ---- */
+/** 在 parent（已定位好的页面容器）里创建 DSH 页对象；只调用一次。 */
+void ui_dsh_create(lv_obj_t *parent);
+/** 更新 DSH 页；s == NULL 或 s->dsh.valid == false 时整页只显示 "DSH N/A"。 */
+void ui_dsh_update(const stats_t *s, bool stale);
+
 /* =====================================================================
  * 建对象的公共小工具（只在创建阶段用；更新阶段禁止再建对象）
  * ===================================================================== */
+
+/** 文本颜色：fresh_color 正常，stale 时统一降饱和到 UI_COL_DIM（新鲜度不变式）。 */
+static inline void ui_text_color(lv_obj_t *lbl, uint32_t fresh_color, bool stale)
+{
+    lv_obj_set_style_text_color(lbl, lv_color_hex(stale ? UI_COL_DIM : fresh_color), LV_PART_MAIN);
+}
 
 /** 纯文字标签：去掉主题样式后设字体/颜色/位置。 */
 static inline lv_obj_t *ui_label(lv_obj_t *parent, const lv_font_t *font, uint32_t color, int x, int y)

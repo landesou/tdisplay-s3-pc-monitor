@@ -479,6 +479,82 @@ WiFi 验证表格）和**真实的 Bearer Token**（写死在 `companion/tests/t
   于是文章里改用 jsDelivr CDN。备选：`gh-proxy.com/<raw url>` 也 200。
   如果哪天 jsDelivr 也挂，最后的稳妥做法是把图片直接传进 CSDN 编辑器让它转存自己的 CDN。
 
+### M12 新功能：DSH 页（token 消耗 + 进程监控）立项（2026-11-10）
+
+用户提出：按一下板载按键进入「DSH 进程监控 + token 消耗」页。先做可行性调研，**两条数据源都实测过**：
+
+**1）token 用量来自 DSH 会话日志**（`~/.dsh/sessions/<项目>/<session-xxx>/session.v4.jsonl.zstd`）
+
+| 实测项 | 结果 |
+|---|---|
+| 每条 `assistant/message` | 带 `data.usage = {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens}` |
+| 时间戳 / 模型名 | 顶层 `time`（毫秒 epoch）/ `data.message.source.model`（实测 `deepseek-flash`） |
+| 规模 | 152 个会话文件 / 131 MB；**24h 内有改动的只有 7 个（9.3 MB）** |
+| 解析耗时 | 单个解压后 8.1 MB 的会话 **0.03 秒** |
+| 其它可用标记 | `agentId` / `teamMember` / `subagent`（以后可以按主代理/队友分开统计） |
+
+→ 按 `(path, mtime, size)` 缓存 + 只重解析变动文件，1 Hz 刷新毫无压力（每帧最多 0.1 s，且可 5 s 节流）。
+
+**2）进程监控**：psutil 枚举 name 含 `DeepSeek Harness` 的进程，当前实测 **10 个 / 合计 RSS 906 MB**
+（Electron renderer/GPU/utility + agent worker），再探 10899 端口是否 LISTENING。
+
+**3）费用估算用官方峰谷价**（2026-11 查 `api-docs.deepseek.com/zh-cn/quick_start/pricing/`）：
+
+| `deepseek-flash`（元/百万 tokens） | 空闲时段 | 高峰时段 |
+|---|---|---|
+| 输入（缓存命中） | 0.02 | 0.04 |
+| 输入（缓存未命中） | 1 | 2 |
+| 输出 | 4 | 8 |
+
+高峰 = 北京时间周一至周五 9:00–12:00、14:00–18:00（法定节假日除外），其余时段空闲；**空闲价是高峰的一半**。
+所以费用**逐条按该条 `time` 判峰谷再取价**，比"均价 × 总量"准得多——这是这个功能最容易做糙的地方。
+
+**契约**：帧里加**可选** `dsh` 对象（`docs/design/architecture.md` §2.5），固件 `stats_t.dsh`
+（`dsh_stats_t`，含 `valid` 标志）。缺字段时设备显示 `--`，老帧/老固件互相兼容。
+
+**分工**：pc-companion → `pcmond/dsh.py` 采集器 + 帧字段 + 测试（task-6）；fw-link → `link.c` 解析 +
+离线断言（task-8）；fw-display → UI 第 3 页 + 三页循环（task-7）；Lead → 契约、`stats.h`、集成、烧录联调、文档。
+
+**诚实边界（要写进 README）**：只统计本机 DSH 日志（不含网页版/其它客户端）；日志落盘才有数（延迟 1–2 s）；
+费用是估算非账单；峰谷判断不查法定节假日表（简化）。
+
+### M13 DSH 页集成验证通过（2026-11-11 上午验收）
+
+**三个同学交付 + Lead 集成**：
+
+| 模块 | 交付 | 验收结果 |
+|---|---|---|
+| pcmond 采集（pc-companion） | `dsh.py`(264) + `dsh_parse.py`(195) + `test_dsh.py`(337) | pytest **112 passed / 1 skipped**（原 90 无退化） |
+| 固件解析（fw-link） | `link.c` 加 dsh 段 + int64 `j_u64()` | 离线测试 61 → **83 checks 全绿**，状态机一行未动 |
+| 固件 UI（fw-display） | `ui_pages.c` DSH 页（15 个对象）+ 三页循环 | 编译 0 error / 0 warning |
+| Lead | 契约 §2.5、`stats.h`、cfg 页号、集成烧录 | 实机第 3 页确认可用 |
+
+**实机结果**（用户确认）：「第 3 页出来了，有 TOKENS / 费用 / REQ / 进程，数字在变」。
+采集数字举例（2026-11-10 晚）：today 353M tokens / `~CNY 12.97` / REQ 1125 / 9 个 DSH 进程 / RSS 1055 MB /
+缓存命中 99%；week 619M / ¥33.53 / 2381 REQ。帧大小 **621–752 B**（带 dsh，1 Hz 无压力）。
+
+**跨零点行为**（次日 09:22 实测）：`dsh.today` 全部归零、`week` 仍计 619M——分桶按本地时区日期，符合预期。
+**`proc.cpu_pct` 是多核累加**（实测 165% = 1.65 核），和 `top` 口径一致，README 已注明"可能 >100%"。
+
+**这一轮踩到 / 决定的事**：
+
+1. **`≈` 和 `¥` 在 Montserrat 里没有字形**（查过字体 unicode 表）→ 费用显示 `~CNY 12.97`。
+   为两个字符加中文字体（几百 KB flash + 转换工具链）不值得。
+2. **源码里不能出现 GBK 编不出的字符**（`•` U+2022、`¥` U+00A5）：编译器诊断一回显，
+   `idf.py` 在 Windows 上按 GBK 写日志会抛 `UnicodeEncodeError`，**整个构建挂掉但不是编译错误**
+   （fw-display 第一次 build 就卡在这，浪费一次全量编译）。已写扫描脚本确认固件源码里 0 个这类字符。
+3. **契约帧长上限从 600 B → 1 KB**：带 dsh 实测 621–752 B；两端缓冲都是 1024 B，超过会整行丢弃/截断，
+   所以设备侧对超长行要留 warning。
+4. **页号被 cfg 夹在 0..1**（`s_page = (page > 1) ? 1 : page`）→ 第 3 页重启后丢了，改成上限 2。
+5. **psutil 性能坑**：`process_iter(["name","memory_info"])` 在 381 个进程上要 **1.66 s**，
+   改成先只枚举 name、命中 DSH 进程再取 memory_info → **0.006 s**；缓存命中时整个 refresh 0.05 s。
+6. **费用逐条判峰谷**：不是"均价 × 总量"。晚上多为空闲半价，所以 3.5 亿 token 才 12.97 元；
+   代价是不能查法定节假日表（简化，README 写明）。
+7. **无数据时不发 `dsh` 字段**（而不是 `valid=false`）：设备端 `valid` 只看"帧里有没有"，
+   老帧/老固件互相兼容（离线测试专门断言两种帧）。
+
+**未验证**：与 DSH 界面/官方账单逐项对账（只和独立解压脚本对过）；节假日峰谷；长时间（数天）缓存文件增长。
+
 ### 团队分工（2026-11-10 开工）
 
 | 成员 | 负责 | 写作用域 | 任务 |

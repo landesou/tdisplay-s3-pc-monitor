@@ -89,3 +89,24 @@ def test_collection_error_does_not_kill_thread():
 def test_interval_has_lower_bound():
     sampler = Sampler(interval_s=0.001, collector=StubCollector())
     assert sampler.interval_s == 0.2
+
+
+def test_dsh_provider_value_is_put_into_frame():
+    payload = {"today": {"tok": 1}, "week": {"tok": 1}, "proc": {"count": 1}}
+    sampler = Sampler(interval_s=1.0, collector=StubCollector(), dsh_provider=lambda: payload)
+    assert sampler.poll_once()["dsh"] == payload
+
+
+def test_dsh_provider_error_does_not_break_sys_frame():
+    def boom():
+        raise RuntimeError("模拟 DSH 读取失败")
+
+    sampler = Sampler(interval_s=1.0, collector=StubCollector(), dsh_provider=boom)
+    snapshot = sampler.poll_once()
+    assert "dsh" not in snapshot
+    assert snapshot["cpu"]["avg"] == 1.0  # sys 段照常产出
+
+
+def test_no_dsh_provider_means_no_dsh_field():
+    sampler = Sampler(interval_s=1.0, collector=StubCollector())
+    assert "dsh" not in sampler.poll_once()

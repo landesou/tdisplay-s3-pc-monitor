@@ -1,8 +1,10 @@
 /**
- * UI 主文件：320x170 横屏两页界面（LVGL 9）。
+ * UI 主文件：320x170 横屏**三页**界面（LVGL 9）。
  *
  *   P0 总览：顶栏(主机名/PC 时间/链路状态) + GPU/CPU/MEM/NET 四卡 + 60 点曲线
  *   P1 明细：见 ui_pages.c（24 线程柱 + 磁盘/显存/温度/时长/帧率）
+ *   P2 DSH ：见 ui_pages.c（DeepSeek Harness 今日 tokens/费用/进程 + 7 天汇总）
+ *   KEY 短按 0→1→2→0 循环；顶栏右侧显示页码 x/3。
  *
  * 两条硬约束：
  *   1. **对象只在 ui_init() 里建一次**。ui_update() 只做
@@ -12,7 +14,7 @@
  *      （st != ONLINE_* 或 age_s > 2，或根本没有数据）所有数值必须降饱和成
  *      UI_COL_DIM 灰、顶栏明确显示 STALE/OFFLINE，绝不能把旧帧画得像实时。
  *
- * 顶栏放在页面容器之外，两页共享 —— 这样翻到明细页也能看到 STALE 提示。
+ * 顶栏放在页面容器之外，三页共享 —— 这样翻到明细/DSH 页也能看到 STALE 提示。
  */
 
 #include <stdio.h>
@@ -37,10 +39,12 @@ static lv_obj_t *s_lbl_host;
 static lv_obj_t *s_lbl_clock;
 static lv_obj_t *s_lbl_link;
 static lv_obj_t *s_dot_link;
+static lv_obj_t *s_lbl_pageno; /* "x/3" */
 
 /* ---- 页面容器 ---- */
 static lv_obj_t *s_page0;
 static lv_obj_t *s_page1;
+static lv_obj_t *s_page2;
 static lv_obj_t *s_offline;
 
 /* ---- 总览页数值对象 ---- */
@@ -73,6 +77,13 @@ static bool     s_last_have;
  * 不能被下面「值没变就跳过」的缓存优化挡掉。 */
 static bool     s_force_full_update;
 
+/* 最近一帧快照：翻页时用它**立刻**刷新新页 —— 1 Hz 数据流下否则会有最多
+ * 1 秒的占位符；也让「按页分派」不用为了预热而刷隐藏页。 */
+static stats_t  s_last_stats;
+static bool     s_last_stats_ok;
+/* 有没有收到过数据：决定 OFFLINE 覆盖层在哪些页显示（P2 自己显 DSH N/A） */
+static bool     s_have_data;
+
 /* =====================================================================
  * 小工具
  * ===================================================================== */
@@ -89,12 +100,26 @@ static void set_bar_color(lv_obj_t *bar, uint32_t fresh_color, bool stale)
 
 static void apply_page(void)
 {
-    if (s_page == 0) {
-        lv_obj_remove_flag(s_page0, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_page1, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *pages[3] = {s_page0, s_page1, s_page2};
+    for (int i = 0; i < 3; i++) {
+        if (i == s_page) {
+            lv_obj_remove_flag(pages[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(pages[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    /* 顶栏页码 x/3 */
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%u/3", (unsigned)(s_page + 1u));
+    lv_label_set_text(s_lbl_pageno, buf);
+
+    /* OFFLINE 覆盖层只对 P0/P1 有意义：P2 没数据时自己显示 DSH N/A，
+     * 两个大灰字叠在屏幕正中会糊成一团。 */
+    if (s_page == 2 || s_have_data) {
+        lv_obj_add_flag(s_offline, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_add_flag(s_page0, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(s_page1, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_offline, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -139,6 +164,9 @@ static void top_bar_create(lv_obj_t *scr)
 
     s_lbl_link = ui_tag(bar, &lv_font_montserrat_14, UI_COL_MUTED, 262, 2, "NO LINK");
     lv_obj_set_width(s_lbl_link, 56);
+
+    /* 页码 x/3：夹在时钟（TOP_MID 居中，约 119..201）和状态点（x=250）之间 */
+    s_lbl_pageno = ui_tag(bar, &lv_font_montserrat_14, UI_COL_MUTED, 210, 3, "1/3");
 }
 
 static void status_update(link_state_t st, uint32_t age_s, bool stale)
@@ -255,17 +283,20 @@ static void page0_create(lv_obj_t *scr)
     lv_chart_set_all_value(s_chart, s_ser_gpu, 0);
 }
 
-static void page0_update(const stats_t *s, bool stale)
+/* 顶栏主机名：属于三页共享的顶栏，不跟页面分派一起走 */
+static void host_update(const stats_t *s, bool stale)
 {
-    char buf[40];
-
-    /* 顶栏主机名 */
     if (s == NULL || s->host[0] == '\0') {
         lv_label_set_text(s_lbl_host, "--");
     } else {
         lv_label_set_text(s_lbl_host, s->host);
     }
     set_label_color(s_lbl_host, UI_COL_MUTED, stale || s == NULL);
+}
+
+static void page0_update(const stats_t *s, bool stale)
+{
+    char buf[40];
 
     if (s == NULL) {
         lv_label_set_text(s_gpu_val, "--");
@@ -352,6 +383,31 @@ static void page1_create(lv_obj_t *scr)
     ui_detail_create(s_page1);
 }
 
+static void page2_create(lv_obj_t *scr)
+{
+    s_page2 = lv_obj_create(scr);
+    lv_obj_remove_style_all(s_page2);
+    lv_obj_set_pos(s_page2, 0, 20);
+    lv_obj_set_size(s_page2, BOARD_LCD_H_RES, BOARD_LCD_V_RES - 20);
+    lv_obj_remove_flag(s_page2, LV_OBJ_FLAG_SCROLLABLE);
+
+    ui_dsh_create(s_page2);
+}
+
+/* 按当前页分派内容刷新：page 0 总览 / page 1 线程明细 / page 2 DSH。
+ * 顶栏（主机名·时间·状态·页码）和 P0 的曲线历史不在这里 —— 它们与页无关，
+ * 由 ui_update() 单独维护，所以翻页不会打断曲线。 */
+static void dispatch_page_update(const stats_t *s, bool stale)
+{
+    if (s_page == 0) {
+        page0_update(s, stale);
+    } else if (s_page == 1) {
+        ui_detail_update(s, stale);
+    } else {
+        ui_dsh_update(s, stale);
+    }
+}
+
 static void offline_create(lv_obj_t *scr)
 {
     s_offline = ui_tag(scr, &lv_font_montserrat_28, UI_COL_DIM, 0, 0, "OFFLINE");
@@ -379,14 +435,18 @@ void ui_init(void)
     top_bar_create(scr);
     page0_create(scr);
     page1_create(scr);
+    page2_create(scr);
     offline_create(scr);
 
     /* 上电先显 OFFLINE，等第一帧到达再撤掉（NO_LINK 的诚实显示） */
     lv_obj_remove_flag(s_offline, LV_OBJ_FLAG_HIDDEN);
 
-    /* 恢复 NVS 里记住的页（architecture.md §4 key=page） */
+    /* 恢复 NVS 里记住的页（architecture.md §4 key=page）。
+     * 注意：cfg_page()/cfg_set_page() 目前把页号夹在 0..1（cfg.c 里是 `> 1`），
+     * 所以 P2 重启后回不来；等 Lead/fw-link 把边界改成 2 就自动生效，
+     * 这边已按 0..2 处理好。 */
     uint8_t saved = cfg_page();
-    s_page = (saved <= 1) ? saved : 0;
+    s_page = (saved <= 2) ? saved : 0;
     apply_page();
 
     s_ready = true;
@@ -412,6 +472,14 @@ void ui_update(const stats_t *s, link_state_t st, uint32_t age_s)
     clock_update(have ? s->pc_time : 0, stale);
     status_update(st, age_s, stale);
 
+    /* 顶栏主机名 + 最近一帧快照（翻页时立刻刷新新页要用） */
+    host_update(s, stale);
+    s_have_data = have;
+    if (have) {
+        s_last_stats = *s;
+        s_last_stats_ok = true;
+    }
+
     /* 只有「新帧 / 有无数据变化 / 新鲜度变化」才重写数值区。
      * s_force_full_update：刚退出标定图模式时强制走一次完整刷新 —— 测试图期间
      * ui_update 一直是早退的，缓存里的 seq/新鲜度可能已经和屏上状态对不上。 */
@@ -430,14 +498,14 @@ void ui_update(const stats_t *s, link_state_t st, uint32_t age_s)
         s_have_seq = true;
     }
 
-    if (have) {
+    /* OFFLINE 只覆盖 P0/P1；P2 没数据时自己显示 DSH N/A */
+    if (have || s_page == 2) {
         lv_obj_add_flag(s_offline, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_remove_flag(s_offline, LV_OBJ_FLAG_HIDDEN);
     }
 
-    page0_update(s, stale);
-    ui_detail_update(s, stale);
+    dispatch_page_update(s, stale);
 
     /* 曲线：只在「有新帧且新鲜」时推进一个点，并且按 PC 时间戳**每秒最多推一个**
      * —— 上位机 1~2 Hz 发帧，按帧推会变成 2 点/秒，60 点窗口只剩 30 秒。
@@ -497,8 +565,13 @@ void ui_next_page(void)
     if (lcd_test_pattern_active()) {
         ui_exit_test_mode();
     }
-    s_page = (uint8_t)((s_page + 1u) % 2u);
+    s_page = (uint8_t)((s_page + 1u) % 3u);
     apply_page();
+
+    /* 立刻用最近一帧刷新新页：只分派当前页的话，1 Hz 数据流下重绘前会有
+     * 最多 1 秒的占位符。还没有数据时按 stale 处理（数字降饱和）。 */
+    bool stale_now = s_last_stats_ok ? s_last_stale : true;
+    dispatch_page_update(s_last_stats_ok ? &s_last_stats : NULL, stale_now);
 }
 
 uint8_t ui_page(void)

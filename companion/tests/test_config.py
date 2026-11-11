@@ -67,3 +67,49 @@ def test_save_roundtrip(tmp_path):
     config.save(path)
     again = Config.load(path)
     assert (again.token, again.port, again.serial, again.wifi_ssid) == ("tok", 9999, "COM7", "S")
+
+
+def test_dsh_defaults(tmp_path):
+    config = Config.load(tmp_path / "config.json")
+    assert config.dsh_enabled is True
+    assert config.dsh_port == 10899
+    assert config.dsh_pricing["deepseek-flash"] == {"cache_hit": 0.04, "cache_miss": 2.0, "output": 8.0}
+
+
+def test_dsh_pricing_override_merges_defaults(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "token": "t",
+                "dsh_port": 19999,
+                "dsh_pricing": {
+                    "deepseek-flash": {"cache_miss": 3.0},
+                    "my-model": {"output": 10.0},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = Config.load(path)
+    assert config.dsh_port == 19999
+    assert config.dsh_pricing["deepseek-flash"]["cache_miss"] == 3.0
+    assert config.dsh_pricing["deepseek-flash"]["cache_hit"] == 0.04  # 未覆盖的键保留默认
+    assert config.dsh_pricing["my-model"] == {"cache_hit": 0.04, "cache_miss": 2.0, "output": 10.0}
+
+
+def test_dsh_invalid_pricing_and_port_are_ignored(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "token": "t",
+                "dsh_port": 99999,
+                "dsh_pricing": {"deepseek-flash": {"cache_miss": "bad"}, "bad-entry": 3},
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = Config.load(path)
+    assert config.dsh_port == 10899
+    assert config.dsh_pricing["deepseek-flash"]["cache_miss"] == 2.0  # 非法值被忽略

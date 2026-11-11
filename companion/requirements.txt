@@ -2,3 +2,5 @@
 # 安装：pip install -r requirements.txt
 psutil>=5.9,<8
 pyserial>=3.5,<4
+zstandard>=0.22,<1  # DSH 会话日志（zstd JSONL）解压
+

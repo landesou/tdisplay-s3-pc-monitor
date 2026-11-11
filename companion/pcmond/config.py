@@ -20,6 +20,13 @@ LOG_PATH = HOME_DIR / "pcmond.log"
 
 DEFAULT_PORT = 8787
 TOKEN_BYTES = 18  # token_urlsafe(18) → 24 个 URL 安全字符
+DEFAULT_DSH_PORT = 10899  # DSH GUI 端口（契约 §2.5 的 proc.port_up）
+# DSH 费用估算单价（元 / 百万 tokens，**高峰期**）；空闲价 = 一半。
+# 来源：DeepSeek 官方价目表（2026-11 查），模型未命中则回退到 deepseek-flash。
+DEFAULT_DSH_PRICING: Dict[str, Dict[str, float]] = {
+    "deepseek-flash": {"cache_hit": 0.04, "cache_miss": 2.0, "output": 8.0},
+}
+DSH_PRICING_KEYS = ("cache_hit", "cache_miss", "output")
 
 T = TypeVar("T")
 
@@ -52,6 +59,12 @@ class Config:
     tray_enabled: bool = True  # 托盘是可选依赖：没装 pystray 时自动降级
     interval_s: float = 1.0  # 采集周期
     usb_hz: float = 1.0  # USB 推送频率（契约 1–2 Hz）
+    # DSH（DeepSeek Harness）数据源：可选；价格表可在 config.json 覆盖
+    dsh_enabled: bool = True
+    dsh_port: int = DEFAULT_DSH_PORT
+    dsh_pricing: Dict[str, Dict[str, float]] = field(
+        default_factory=lambda: {model: dict(units) for model, units in DEFAULT_DSH_PRICING.items()}
+    )
     # 可选：设备 hello 请求配置时，通过 USB 下发写 NVS（架构 §4）
     wifi_ssid: Optional[str] = None
     wifi_pass: Optional[str] = None
@@ -93,6 +106,12 @@ class Config:
         config.tray_enabled = _pick(raw, "tray_enabled", config.tray_enabled, _as_bool)
         config.interval_s = _clamp(_pick(raw, "interval_s", config.interval_s, float), 0.2, 60.0)
         config.usb_hz = _clamp(_pick(raw, "usb_hz", config.usb_hz, float), 1.0, 2.0)
+        config.dsh_enabled = _pick(raw, "dsh_enabled", config.dsh_enabled, _as_bool)
+        dsh_port = _pick(raw, "dsh_port", config.dsh_port, int)
+        config.dsh_port = dsh_port if 1 <= dsh_port <= 65535 else DEFAULT_DSH_PORT
+        if config.dsh_port != dsh_port:
+            LOGGER.warning("dsh_port %s 非法，改用默认 %s", dsh_port, DEFAULT_DSH_PORT)
+        config.dsh_pricing = _load_pricing(raw.get("dsh_pricing"), config.dsh_pricing)
         for key in ("wifi_ssid", "wifi_pass"):
             value = _pick(raw, key, None, str)
             setattr(config, key, str(value) if value else None)
@@ -115,6 +134,9 @@ class Config:
             "tray_enabled": self.tray_enabled,
             "interval_s": self.interval_s,
             "usb_hz": self.usb_hz,
+            "dsh_enabled": self.dsh_enabled,
+            "dsh_port": self.dsh_port,
+            "dsh_pricing": self.dsh_pricing,
             "wifi_ssid": self.wifi_ssid,
             "wifi_pass": self.wifi_pass,
         }
@@ -133,3 +155,31 @@ def _pick(raw: dict, key: str, default: T, caster: Callable[[Any], T]) -> T:
     except (TypeError, ValueError) as exc:
         LOGGER.warning("配置字段 %s 非法（%s），使用默认值 %r", key, exc, default)
         return default
+
+
+def _load_pricing(raw: Any, defaults: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
+    """合并用户价格覆盖 `{model: {cache_hit, cache_miss, output}}`；非法项忽略并保留默认。"""
+    pricing = {model: dict(units) for model, units in defaults.items()}
+    if raw is None:
+        return pricing
+    if not isinstance(raw, dict):
+        LOGGER.warning("dsh_pricing 必须是对象，忽略并使用默认价格表")
+        return pricing
+    for model, units in raw.items():
+        if not isinstance(model, str) or not isinstance(units, dict):
+            LOGGER.warning("dsh_pricing 条目非法（%r），忽略", model)
+            continue
+        target = pricing.setdefault(model, dict(DEFAULT_DSH_PRICING["deepseek-flash"]))
+        for key in DSH_PRICING_KEYS:
+            if key not in units:
+                continue
+            try:
+                value = float(units[key])
+            except (TypeError, ValueError):
+                LOGGER.warning("dsh_pricing.%s.%s 非法，忽略", model, key)
+                continue
+            if value < 0:
+                LOGGER.warning("dsh_pricing.%s.%s 为负数，忽略", model, key)
+                continue
+            target[key] = value
+    return pricing

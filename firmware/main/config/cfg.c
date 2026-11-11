@@ -159,7 +159,8 @@ uint8_t cfg_page(void) { return s_page; }
 
 void cfg_set_page(uint8_t page)
 {
-    s_page = (page > 1) ? 1 : page;
+    /* 页数上限跟着 UI 走：v1.1 起是 3 页（总览 / 线程明细 / DSH），越界一律夹到最后一页 */
+    s_page = (page > 2) ? 2 : page;
     if (!s_ready) {
         return;
     }

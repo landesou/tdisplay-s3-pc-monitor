@@ -9,7 +9,7 @@ import platform
 import sys
 import threading
 import time
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from . import __version__
 from .collectors import Collector
@@ -35,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-usb", action="store_true", help="本次关闭 USB 链路")
     parser.add_argument("--no-http", action="store_true", help="本次关闭 HTTP 链路")
     parser.add_argument("--no-tray", action="store_true", help="本次关闭系统托盘（即使装了 pystray）")
+    parser.add_argument("--no-dsh", action="store_true", help="本次关闭 DSH 数据源（帧里不带 dsh）")
     parser.add_argument("--interval", type=float, help="采集周期秒（默认 1.0）")
     parser.add_argument("--version", action="version", version=f"pcmond {__version__}")
     return parser
@@ -54,6 +55,8 @@ def apply_overrides(config: Config, args: argparse.Namespace) -> Config:
         config.http_enabled = False
     if args.no_tray:
         config.tray_enabled = False
+    if args.no_dsh:
+        config.dsh_enabled = False
     if args.interval is not None:
         config.interval_s = max(0.2, float(args.interval))
     return config
@@ -85,12 +88,14 @@ def setup_logging(verbose: bool, once: bool) -> None:
         root.addHandler(console)
 
 
-def run_once() -> int:
+def run_once(config: Config) -> int:
     """采一帧打印到 stdout 后退出（验收用，不连串口/不开端口）。"""
     collector = Collector()
     collector.warmup()
     time.sleep(WARMUP_SECONDS)  # 给 psutil 一个可测窗口，首帧 CPU 占用率才不是 0
-    snapshot = build_snapshot(collector.collect(), seq=1)
+    sample = collector.collect()
+    dsh_payload = _collect_dsh_once(config)
+    snapshot = build_snapshot(sample, seq=1, dsh=dsh_payload)
     line = to_json(snapshot)
     stream = sys.stdout or sys.stderr
     if stream is not None:
@@ -98,8 +103,28 @@ def run_once() -> int:
         stream.flush()
     else:  # pythonw 下两个流都没了
         LOGGER.info("--once 输出：%s", line)
-    LOGGER.info("--once 完成：%d 字节，gpu=%s", len(line.encode("utf-8")), "ok" if snapshot.get("gpu") else "null")
+    LOGGER.info(
+        "--once 完成：%d 字节，gpu=%s，dsh=%s",
+        len(line.encode("utf-8")),
+        "ok" if snapshot.get("gpu") else "null",
+        "ok" if dsh_payload else "none",
+    )
     return 0
+
+
+def _collect_dsh_once(config: Config) -> Optional[Dict[str, Any]]:
+    """--once 用：同步跑一次 DSH 采集（含进程 CPU 预热）；失败只降级为无 dsh。"""
+    if not config.dsh_enabled:
+        LOGGER.info("DSH 采集已关闭（--no-dsh / dsh_enabled=false）")
+        return None
+    try:
+        from .dsh import DshSampler
+
+        sampler = DshSampler(pricing=config.dsh_pricing, port=config.dsh_port)
+        return sampler.refresh()
+    except Exception:  # noqa: BLE001 - DSH 是附加数据，失败不能影响 sys 段
+        LOGGER.exception("DSH 采集失败，本帧不带 dsh 字段")
+        return None
 
 
 def run_daemon(config: Config) -> int:
@@ -113,12 +138,31 @@ def run_daemon(config: Config) -> int:
     LOGGER.info("Bearer Token：%s", config.token)
 
     stop_event = threading.Event()
-    sampler = Sampler(config.interval_s)
+    sampler: Optional[Sampler] = None
+    dsh_sampler: Optional[Any] = None
     http_link: Optional[HttpLink] = None
     usb_link: Optional[Any] = None
     tray_icon: Optional[Any] = None
 
     try:
+        # DSH 统计较贵：独立线程每 5 s 刷新一次，1 Hz 发帧只读 latest() 缓存
+        if config.dsh_enabled:
+            try:
+                from .dsh import DshSampler
+
+                dsh_sampler = DshSampler(pricing=config.dsh_pricing, port=config.dsh_port)
+                dsh_sampler.start()
+                LOGGER.info("DSH 采集线程已启动（%.0f s/刷新，端口 %d）", dsh_sampler.refresh_s, config.dsh_port)
+            except Exception:  # noqa: BLE001 - DSH 是附加数据，失败不能让主进程退出
+                LOGGER.exception("DSH 采集启动失败，帧里将不带 dsh 字段")
+                dsh_sampler = None
+        else:
+            LOGGER.info("DSH 采集已关闭（--no-dsh / dsh_enabled=false）")
+
+        sampler = Sampler(
+            config.interval_s,
+            dsh_provider=dsh_sampler.latest if dsh_sampler is not None else None,
+        )
         sampler.start()
         LOGGER.info("采集线程已启动（%.2f s/帧）", sampler.interval_s)
 
@@ -155,7 +199,10 @@ def run_daemon(config: Config) -> int:
             usb_link.stop()
         if http_link is not None:
             http_link.stop()
-        sampler.stop()
+        if sampler is not None:
+            sampler.stop()
+        if dsh_sampler is not None:
+            dsh_sampler.stop()
         LOGGER.info("pcmond 已退出")
     return 0
 
@@ -207,7 +254,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     config = apply_overrides(config, args)
     setup_logging(args.verbose, args.once)
     if args.once:
-        return run_once()
+        return run_once(config)
     return run_daemon(config)
 
 

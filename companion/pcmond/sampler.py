@@ -9,7 +9,7 @@ import logging
 import queue
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from .collectors import Collector
 from .snapshot import build_snapshot
@@ -23,9 +23,16 @@ QUEUE_MAXSIZE = 2
 class Sampler:
     """采集线程 + 最新快照缓存。"""
 
-    def __init__(self, interval_s: float = 1.0, collector: Optional[Collector] = None) -> None:
+    def __init__(
+        self,
+        interval_s: float = 1.0,
+        collector: Optional[Collector] = None,
+        dsh_provider: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
+    ) -> None:
         self.interval_s = max(0.2, float(interval_s))
         self.collector = collector if collector is not None else Collector()
+        # DSH 统计由独立线程每 5 s 刷新，这里只读缓存，绝不每帧解压日志
+        self._dsh_provider = dsh_provider
         self.queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=QUEUE_MAXSIZE)
         self._latest: Optional[Dict[str, Any]] = None
         self._latest_monotonic: Optional[float] = None
@@ -55,7 +62,13 @@ class Sampler:
     def poll_once(self) -> Dict[str, Any]:
         """采一帧并发布（也供 --once/单测直接调用）。"""
         self.seq += 1
-        snapshot = build_snapshot(self.collector.collect(), self.seq)
+        dsh: Optional[Dict[str, Any]] = None
+        if self._dsh_provider is not None:
+            try:
+                dsh = self._dsh_provider()
+            except Exception:  # noqa: BLE001 - DSH 挂了也必须照常出 sys 段
+                LOGGER.exception("读取 DSH 缓存失败，本帧不带 dsh 字段")
+        snapshot = build_snapshot(self.collector.collect(), self.seq, dsh=dsh)
         with self._lock:
             self._latest = snapshot
             self._latest_monotonic = time.monotonic()

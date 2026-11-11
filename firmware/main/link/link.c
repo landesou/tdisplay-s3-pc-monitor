@@ -93,6 +93,41 @@ static int clamp_pct(int v)
     return v;
 }
 
+/* 无符号 64 位整数：cJSON 的 valueint 是 int，token 这种大数会被截断；
+ * 必须走 valuedouble 再转。double 对 2^53 以内的整数是精确的，token 完全够用。 */
+static uint64_t j_u64(const cJSON *obj, const char *key)
+{
+    const cJSON *it = obj_item(obj, key);
+    if (!cJSON_IsNumber(it)) {
+        return 0;
+    }
+    double v = it->valuedouble;
+    if (!(v > 0.0)) {
+        return 0;
+    }
+    if (v >= 9.0e18) {
+        return UINT64_MAX;   /* 超界保护：直接 cast 是 UB */
+    }
+    return (uint64_t)llround(v);
+}
+
+/* 无符号小整数，带上限夹取（req / proc.* 这类字段） */
+static uint32_t j_u32(const cJSON *obj, const char *key, uint32_t max_value)
+{
+    const cJSON *it = obj_item(obj, key);
+    if (!cJSON_IsNumber(it)) {
+        return 0;
+    }
+    double v = it->valuedouble;
+    if (!(v > 0.0)) {
+        return 0;
+    }
+    if (v > (double)max_value) {
+        return max_value;
+    }
+    return (uint32_t)llround(v);
+}
+
 bool link_parse_frame(const char *json, size_t len, stats_t *out)
 {
     if (json == NULL || out == NULL || len == 0) {
@@ -172,6 +207,41 @@ bool link_parse_frame(const char *json, size_t len, stats_t *out)
         if (cJSON_IsObject(disk)) {
             out->disk_read  = j_float(disk, "read", 0.0f);
             out->disk_write = j_float(disk, "write", 0.0f);
+        }
+
+        /* ---- dsh（v1.1 可选段，契约 §2.5）----
+         * 没这一段 / 不是对象 → valid=false（memset 已归零），不报错、不丢帧：
+         * 老版本上位机发的帧必须继续能解析。缺子字段时按 0 处理。 */
+        const cJSON *dsh = obj_item(root, "dsh");
+        if (cJSON_IsObject(dsh)) {
+            dsh_stats_t *d = &out->dsh;
+            d->valid = true;
+
+            const cJSON *today = obj_item(dsh, "today");
+            if (cJSON_IsObject(today)) {
+                d->today_tok   = j_u64(today, "tok");
+                d->today_in    = j_u64(today, "in");
+                d->today_out   = j_u64(today, "out");
+                d->today_cache = j_u64(today, "cache");
+                d->today_req   = j_u32(today, "req", UINT32_MAX);
+                d->today_cost  = j_float(today, "cost", 0.0f);
+            }
+
+            const cJSON *week = obj_item(dsh, "week");
+            if (cJSON_IsObject(week)) {
+                d->week_tok       = j_u64(week, "tok");
+                d->week_req       = j_u32(week, "req", UINT32_MAX);
+                d->week_cost      = j_float(week, "cost", 0.0f);
+                d->week_cache_pct = (uint8_t)j_u32(week, "cache_pct", 100);
+            }
+
+            const cJSON *proc = obj_item(dsh, "proc");
+            if (cJSON_IsObject(proc)) {
+                d->proc_count   = (uint16_t)j_u32(proc, "count", UINT16_MAX);
+                d->proc_rss_mb  = (uint16_t)j_u32(proc, "rss_mb", UINT16_MAX);
+                d->proc_cpu_pct = (uint8_t)j_u32(proc, "cpu_pct", 100);
+                d->proc_port_up = cJSON_IsTrue(obj_item(proc, "port_up"));
+            }
         }
     }
 

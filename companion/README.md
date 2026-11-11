@@ -9,6 +9,8 @@
 - 所有异常都降级：串口拔掉自动重连；`nvidia-smi` 不存在/超时（3 s）时 GPU 字段发 `null`；
   HTTP 端口被占只关闭 HTTP，采集和 USB 继续。
 - 可选**系统托盘**（pystray + Pillow）：状态圆点 + 右键菜单，没装依赖自动降级、不影响运行。
+- 可选 **DSH 数据源**：扫 `~/.dsh/sessions` 统计 token 消耗（今日/近 7 天 + 费用估算）+ DSH 进程监控，
+  帧里加契约 §2.5 的 `dsh` 对象；独立线程 5 s 刷新，没有数据时不发该字段。
 - 不需要管理员权限、不装驱动、不改系统设置。
 
 ## 目录结构
@@ -26,9 +28,11 @@ companion/
 │   ├── rates.py        # 累计计数器 → MiB/s 差分
 │   ├── netinfo.py      # 本机局域网地址
 │   ├── tray.py         # 可选：系统托盘（pystray/Pillow，状态圆点 + 右键菜单）
+│   ├── dsh.py          # DSH 采集：会话日志缓存 + 进程/端口统计 + 5 s 刷新线程
+│   ├── dsh_parse.py    # DSH 日志解析：zstd JSONL → 按天 token/费用（纯函数）
 │   └── main.py         # argparse / 日志 / 进程编排
-├── tests/              # pytest（差分、Token、JSON 契约、GPU 解析、预热、队列、托盘）
-├── requirements.txt
+├── tests/              # pytest（差分、Token、JSON 契约、GPU、预热、队列、托盘、DSH）
+├── requirements.txt    # psutil / pyserial / zstandard
 ├── requirements-tray.txt  # 可选托盘依赖（默认不装）
 ├── setup.ps1           # 创建 .venv 并装依赖（-WithTray 加托盘）
 ├── run.ps1             # pythonw 无窗口后台启动
@@ -46,7 +50,7 @@ cd D:\AI_vibe\tdisplay-s3-pc-monitor\companion
 powershell -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
-`setup.ps1` 会用本机 conda Python 建 `.venv` 并安装 `psutil`、`pyserial`（默认源失败自动换清华源）。
+`setup.ps1` 会用本机 conda Python 建 `.venv` 并安装 `psutil`、`pyserial`、`zstandard`（默认源失败自动换清华源）。
 需要系统托盘时加 `-WithTray`（额外装 `pystray`、`Pillow`）：
 
 ```powershell
@@ -84,6 +88,7 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 | `--serial COM7` | 指定串口（默认按 VID 0x303A / 描述自动发现） |
 | `--no-usb` / `--no-http` | 关闭某条链路 |
 | `--no-tray` | 关闭系统托盘（即使装了 pystray） |
+| `--no-dsh` | 关闭 DSH 数据源（帧里不带 `dsh` 字段） |
 | `--interval 1.0` | 采集周期（秒，≥0.2） |
 
 日志写到 `%USERPROFILE%\.tdisplay-pcmon\pcmond.log`（1 MB × 3 轮转，UTF-8）。
@@ -103,6 +108,11 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
   "tray_enabled": true,
   "interval_s": 1.0,
   "usb_hz": 1.0,
+  "dsh_enabled": true,
+  "dsh_port": 10899,
+  "dsh_pricing": {
+    "deepseek-flash": {"cache_hit": 0.04, "cache_miss": 2.0, "output": 8.0}
+  },
   "wifi_ssid": null,
   "wifi_pass": null
 }
@@ -110,6 +120,9 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 
 - `serial: null` = 自动发现；也可以写死 `"COM7"`。
 - `usb_hz` 契约要求 1–2 Hz，超出会被夹到边界。
+- `dsh_enabled` / `dsh_port` / `dsh_pricing`：DSH 数据源开关、GUI 端口（用于 `proc.port_up` 探测）、
+  费用单价（元/百万 tokens，**高峰期**价格；空闲自动半价）。价格表按模型覆盖，未覆盖的键沿用默认，
+  未知模型回退到 `deepseek-flash`；改价格表会自动作废旧解析缓存。
 - `wifi_ssid` / `wifi_pass` 是可选项：填了之后，设备通过 USB 发 `{"t":"hello","need_cfg":1}` 时，
   pcmond 会回一帧 `{"t":"cfg","wifi_ssid":...,"wifi_pass":...,"api_token":...,"api_url":...}`
   让设备写 NVS 并重启（架构 §4 的推荐配置路径）。`api_url` 自动取本机局域网 IP。
@@ -138,6 +151,43 @@ curl.exe -H "Authorization: Bearer $token" http://127.0.0.1:8787/api/stats
   `USB 串行设备` / `USB JTAG` / `USB-SERIAL` / `ESP32`。先认 PID 是为了同机插多块 Espressif 设备时不误抓。
 - 断开后指数退避重连（0.5 → 1 → 2 … 最大 10 s，连上后重置），不影响采集与 HTTP。
 - 收到的设备行若是 JSON 且 `t == "hello"`、`need_cfg` 非 0，则按上节回 cfg 帧；其他串口输出只记 DEBUG 日志。
+
+## DSH 页数据来源与口径（可选）
+
+`dsh` 对象字段见契约 §2.5；设备页给费用标 `≈` 表示是**估算、不是账单**。
+
+### token 用量
+- 扫 `%USERPROFILE%\.dsh\sessions\**\session*.jsonl.zstd`（zstd 压缩的 JSONL），
+  取 `type == "assistant/message"` 记录的 `data.usage`：
+  `inputTokens`（未命中输入）、`outputTokens`、`cacheReadTokens`（缓存命中输入）、
+  `cacheWriteTokens`（按未命中价计费）、`totalTokens`（= in + out + cacheRead + cacheWrite）。
+- `today` = 本机时区当天 00:00 起；`week` = 滚动 7 天（含今天）；
+  `req` = assistant/message 条数（interrupted 且没有 usage 的消息也计 1 次、token 记 0）。
+- 只统计**本机** DSH 会话日志，不含网页版/其它客户端；日志落盘前不计入（界面延迟约 1–2 s）。
+
+### 刷新与缓存
+- 独立 daemon 线程每 **5 s** 扫一次，1 Hz 发帧只读 `latest()` 缓存，**不会每帧解压日志**。
+- 解析结果缓存到 `%USERPROFILE%\.tdisplay-pcmon\dsh_cache.json`，按 `(path, mtime, size)` 增量：
+  只重解析有改动/新增的文件；改 `dsh_pricing` 会自动作废旧缓存。
+- 只扫 mtime 在近 7 天窗口内的文件（更早的文件不可能含窗口内消息）。
+- 单个文件损坏/格式变化 → 跳过该文件并记 warning，其余照常；**近 7 天没有任何可用 token 记录时
+  帧里不带 `dsh` 字段**（设备显示 `--`），不塞一堆 0。
+
+### 费用估算口径（估算，非账单）
+- **逐条**按该条 `time` 判断峰谷 + 该条模型单价累加，不用"均价 × 总量"；
+- 高峰 = 北京时间**周一至周五 9:00–12:00、14:00–18:00**（左闭右开），其余时段空闲，空闲价 = 高峰价一半；
+- `deepseek-flash` 高峰价：缓存命中 **0.04**、未命中 **2**、输出 **8** 元/百万 tokens；
+  `cacheWrite` 按未命中价；未知模型回退 `deepseek-flash` 价；
+- **简化：只按星期 + 时段判断，不查中国法定节假日表**；官方调价后改 `config.json` 的 `dsh_pricing`；
+- 官方价格页：<https://api-docs.deepseek.com/zh-cn/quick_start/pricing/>。
+
+### 进程
+- `proc.count` = 进程名含 `DeepSeek Harness` 的进程数（psutil 枚举）；
+- `proc.rss_mb` = 这些进程 RSS 合计（MiB 取整）；
+- `proc.cpu_pct` = 各进程 `cpu_percent(interval=None)` 之和（psutil 首调恒为 0，5 s 后准确）；
+- `proc.port_up` = 本机 `dsh_port`（默认 10899）TCP 探测是否在监听。
+
+关闭：`--no-dsh` 启动或配置 `dsh_enabled: false`。带 `dsh` 时整帧约 650–760 B（1 Hz 下带宽无压力）。
 
 ## 开机自启
 
@@ -208,6 +258,8 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WithTray   # 装托盘依�
 | 托盘没有图标 | ① 没装 pystray/Pillow（日志会有一条 warning；`setup.ps1 -WithTray` 重装）；② 用了 `--no-tray` 或 `tray_enabled: false`；③ pythonw 无窗口运行时看不到控制台是正常的，托盘图标就是可见入口。 |
 | 托盘退出后怎么确认进程没了 | 菜单「退出」会先停采集/链路再退出；也可 `Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" \| Where-Object { $_.CommandLine -like "*-m pcmond*" }` 查，或 `taskkill /IM pythonw.exe /F`（会留下未优雅关闭的日志）。 |
 | 想看更细日志 | `--verbose` 启动，或直接看 `%USERPROFILE%\.tdisplay-pcmon\pcmond.log`。 |
+| 帧里没有 `dsh` 字段 | 近 7 天没有可解析的 DSH 会话日志（`%USERPROFILE%\.dsh\sessions` 为空或全坏）、用了 `--no-dsh` / `dsh_enabled:false`，或没装 `zstandard`（日志里有 warning）。 |
+| `dsh.today.tok` 比 DSH 界面小 | 只统计本机会话日志，且有约 1–2 s 落盘延迟；正在生成的会话会略滞后。费用也只是估算，不是账单。 |
 
 ## 测试
 
@@ -221,16 +273,19 @@ C:\Users\Lenovo\miniconda3\python.exe -m pytest companion -q
 解析（含 `N/A`、虚拟适配器、命令不存在、超时、非零退出）、`cpu_percent` 预热顺序、
 `queue.Queue(maxsize=2)` 丢旧帧、端口冲突降级、串口异常重连、hello→cfg 字段；
 托盘部分：状态→颜色/文案映射、Token 打码（`***`）、pystray 缺失时 `start()` 返回 False 不抛、
-菜单四项、退出回调、explorer/notepad 启动参数。未装 Pillow 时仅真实绘图那条会 skip。
+菜单四项、退出回调、explorer/notepad 启动参数；DSH 部分：today/week 边界、峰谷价格、
+价格覆盖与未知模型回退、缓存增量命中与价格变更重建、坏文件跳过、字段缺失容错、
+进程/端口统计、线程异常不退出、`dsh` 可选字段。未装 Pillow 时仅真实绘图那条会 skip。
 
 > `.venv` 只装**运行**依赖（psutil/pyserial）。要在 venv 里跑测试，先
 > `.\.venv\Scripts\python.exe -m pip install pytest`；或者直接用上面的基础 python 命令。
 
-## 未验证项（等真机）
+## 未验证项
 
-- 板子现在没插在电脑上（无 `VID_303A` 设备），**USB CDC 真机推帧/断线重连/hello 握手未做硬件联调**，
-  目前只有单测 + 假串口验证。
-- 1 Hz、约 400 B/帧下的长时间稳定性、USB 丢帧率（需实机压测）。
+- USB CDC 真机推帧 / 断线重连 / hello 握手：2026-11-10 在 COM10 上验证过 1 Hz 推帧连续、
+  设备 hello 每 5 s 正确读取；**运行中拔线→黄→插回→绿的热切换仍待人工拔一次线**。
+- 1 Hz、约 420 B（不带 dsh）/ 约 700 B（带 dsh）每帧下的长时间稳定性、USB 丢帧率（需更长时间压测）。
 - Windows 防火墙实际放行后设备端能否稳定轮询（本机未在局域网设备上验证）。
-- **托盘绿色状态（串口已打开）未真机验证**：本机没有板子，现在托盘只能实测到黄色（仅 HTTP）；
-  绿色分支由单测（`TrayStatus.color`）覆盖，真机插上 USB 后再确认。
+- **托盘绿色状态**：2026-11-10 真机验证（COM10 插着时绿色；`--no-usb` 时黄色）；热插拔切换同上待人工。
+- **DSH 数字与 DSH 自身统计/官方账单的对账**：today/week token 与独立解压脚本逐条核对**完全一致**
+  （2026-11-10），但没和 DSH UI 显示值、官方账单逐项对账；峰谷也简化了节假日。

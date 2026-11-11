@@ -5,17 +5,21 @@
  * 目的：板子没插电脑时 USB/WiFi 传输验证不了，但「新鲜度状态机 + JSON 解析」这两块
  *       纯逻辑可以在主机上真跑一遍，比"看着像对"强得多。
  *
- * 覆盖（共 61 条断言）：
+ * 覆盖（共 83 条断言）：
  *   [1] 状态机全部迁移 —— INIT 丢帧 / boot_done / NO_LINK / USB 与 WiFi 进在线 /
  *       3 个 tick 转 STALE(age=3) / USB 优先抢占 / WiFi 帧在 USB 在线时被忽略 /
  *       link_lost 回 NO_LINK / SLEEP 终态吃帧不动
  *       + 不变式「ONLINE_* 时 age <= 2」在每次 tick 后断言（logicprobe 验过的那条）
  *   [2] 解析上位机 pcmond --once 输出的**真实帧**（frame.json，424 B、24 核、带 GPU 段）
+ *       并确认它**没有 dsh 段** → dsh.valid=false（老帧兼容）
  *   [3] 解析边界：gpu:null、cpu.avg:null、cores 40 个截到 32、越界占用率夹到 0..100、
  *       截断 JSON / 数组 / 空输入全部拒收
+ *   [4] 解析 dsh 段（frame_dsh.json，契约 §2.5）：today/week/proc 各字段数值、
+ *       int64 token 不被截断（> 2^32 的值必须原样）、port_up 布尔、费用浮点误差
  *
  * 构建/运行：bash firmware/test/host_link/run.sh
  */
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -259,6 +263,8 @@ static void test_parse_real_frame(const char *frame_path)
         CHECK(s.gpu_power >= 0.0f, "gpu.power = %.1f W", s.gpu_power);
         CHECK(s.net_down >= 0.0f, "net.down = %.2f MiB/s", s.net_down);
         CHECK(s.disk_write >= 0.0f, "disk.write = %.2f MiB/s", s.disk_write);
+        /* 老帧兼容：这份真实帧里没有 dsh 段，必须 valid=false 且不报错 */
+        CHECK(!s.dsh.valid, "old frame without dsh -> dsh.valid == false");
     }
     free(json);
 }
@@ -313,15 +319,67 @@ static void test_parse_edges(void)
           s.cores[0], s.cores[1], s.cores[2]);
 }
 
+/* ---------------- 测试 4：dsh 段（契约 §2.5，v1.1 可选） ---------------- */
+
+static void test_parse_dsh(const char *frame_path)
+{
+    printf("\n[4] parse dsh section (%s)\n", frame_path);
+    char *json = read_file(frame_path);
+    if (json == NULL) {
+        printf("  FAIL : cannot open %s\n", frame_path);
+        s_failures++;
+        s_checks++;
+        return;
+    }
+
+    stats_t s;
+    bool ok = link_parse_frame(json, strlen(json), &s);
+    CHECK(ok, "frame with dsh parses");
+    CHECK(s.dsh.valid, "dsh.valid == true when section present");
+    CHECK(s.dsh.today_tok == 1280000ULL, "today.tok = %.0f", (double)s.dsh.today_tok);
+    CHECK(s.dsh.today_in == 620000ULL, "today.in = %.0f", (double)s.dsh.today_in);
+    CHECK(s.dsh.today_out == 96000ULL, "today.out = %.0f", (double)s.dsh.today_out);
+    CHECK(s.dsh.today_cache == 566000ULL, "today.cache = %.0f", (double)s.dsh.today_cache);
+    CHECK(s.dsh.today_req == 366U, "today.req = %u", s.dsh.today_req);
+    CHECK(fabsf(s.dsh.today_cost - 1.23f) < 1e-3f, "today.cost = %.3f (want 1.23)", s.dsh.today_cost);
+    CHECK(s.dsh.week_tok == 8800000ULL, "week.tok = %.0f", (double)s.dsh.week_tok);
+    CHECK(s.dsh.week_req == 2100U, "week.req = %u", s.dsh.week_req);
+    CHECK(s.dsh.week_cache_pct == 87U, "week.cache_pct = %u", s.dsh.week_cache_pct);
+    CHECK(fabsf(s.dsh.week_cost - 8.40f) < 1e-3f, "week.cost = %.3f (want 8.40)", s.dsh.week_cost);
+    CHECK(s.dsh.proc_count == 10U, "proc.count = %u", s.dsh.proc_count);
+    CHECK(s.dsh.proc_rss_mb == 906U, "proc.rss_mb = %u", s.dsh.proc_rss_mb);
+    CHECK(s.dsh.proc_cpu_pct == 12U, "proc.cpu_pct = %u", s.dsh.proc_cpu_pct);
+    CHECK(s.dsh.proc_port_up == true, "proc.port_up = %s", s.dsh.proc_port_up ? "true" : "false");
+    CHECK(s.n_cores == 24, "performance fields unaffected (n_cores = %d)", s.n_cores);
+    free(json);
+
+    /* int64 回归：token 超过 2^32 也必须原样，不能被 cJSON valueint(int) 截断。
+     * 2^40 = 1099511627776，double 能精确表示。 */
+    const char *big =
+        "{\"v\":1,\"seq\":7,\"dsh\":{\"today\":{\"tok\":1099511627776},"
+        "\"proc\":{\"port_up\":false}}}";
+    ok = link_parse_frame(big, strlen(big), &s);
+    CHECK(ok, "dsh frame with only partial fields parses");
+    CHECK(s.dsh.today_tok == 1099511627776ULL,
+          "int64 token survives (>2^32): today.tok = %.0f",
+          (double)s.dsh.today_tok);
+    CHECK(s.dsh.proc_port_up == false, "proc.port_up false parsed as %s",
+          s.dsh.proc_port_up ? "true" : "false");
+    CHECK(s.dsh.week_tok == 0ULL, "missing dsh fields default to 0 (week.tok = %.0f)",
+          (double)s.dsh.week_tok);
+}
+
 int main(int argc, char **argv)
 {
-    /* run.sh 会把 frame.json 的绝对路径作为 argv[1] 传进来；手动跑时默认同目录。 */
+    /* run.sh 会把两个 fixture 的绝对路径传进来；手动跑时默认同目录。 */
     const char *frame_path = (argc > 1) ? argv[1] : "frame.json";
+    const char *dsh_path = (argc > 2) ? argv[2] : "frame_dsh.json";
 
     printf("=== fw-link host test (real firmware/main/link/link.c) ===\n");
     test_state_machine();
     test_parse_real_frame(frame_path);
     test_parse_edges();
+    test_parse_dsh(dsh_path);
 
     printf("\n=== %d checks, %d failure(s) ===\n", s_checks, s_failures);
     return (s_failures == 0) ? 0 : 1;

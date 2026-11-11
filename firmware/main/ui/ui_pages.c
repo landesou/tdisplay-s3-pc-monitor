@@ -161,3 +161,211 @@ void ui_detail_update(const stats_t *s, bool stale)
     }
     lv_label_set_text(s_line2, line2);
 }
+
+/* =====================================================================
+ * 页面 2：DSH（DeepSeek Harness）token / 进程页
+ * =====================================================================
+ * 布局（坐标是页面容器内的：容器从顶栏 20 px 之下开始，320x150）：
+ *   左卡 (4,2,150,108)    TOKENS TODAY / 大数字(28) / IN·OUT / CACHE·命中率
+ *   右卡 (158,2,158,108)  今日费用(20) / REQ(20) / DSH 进程 / RSS·CPU
+ *   底部条 (4,112,312,36) 7 天滚动："7D 8.8M TOK | ~CNY 8.40 | 2100 REQ"
+ *   覆盖层：dsh.valid == false 时隐藏三块卡、整页显示 "DSH N/A"（不留一堆 0）
+ *
+ * 字形限制（查过 vendored Montserrat 的 unicode 表：0x20-0x7E + 0xB0(度) +
+ * U+2022(圆点) + LVGL 私有符号；**没有** U+2248(约等号)、U+00A5(人民币符号)、
+ * U+00B7(中点) 的字形），所以界面上不能直接用这三个字符：
+ *   费用 -> "~CNY 1.23"（`~` 表示估算，契约要求「必须标估算」的意图不变）
+ *   分隔 -> ASCII "|"（中点没字形；圆点虽有字形但会搞崩 Windows 构建日志，见下）
+ *   要真显示约等号/人民币符号需要额外字体（占 flash），等 Lead 决定。
+ *
+ * 另：**这两个文件里不要出现 GBK 编不出的字符**（U+2022、U+00A5 等）。
+ * 实测 idf.py 在 Windows 上用 GBK 往控制台写构建日志，编译器诊断一旦回显含
+ * 这类字符的源码行，idf.py 就抛 UnicodeEncodeError 把整个构建搞挂（不是编译错误）。
+ *
+ * 数据语义（link.c 解析侧用哨兵默认值，UI 要把它们当"缺字段"）：
+ *   today_req/week_req == UINT32_MAX、proc_count/proc_rss_mb == UINT16_MAX -> "--"
+ *   week_cache_pct == 0 -> "--"（0% 多半是没数据，别让人误读成"零命中"）
+ */
+
+static lv_obj_t *s_dsh_left;
+static lv_obj_t *s_dsh_right;
+static lv_obj_t *s_dsh_bottom;
+static lv_obj_t *s_dsh_na;
+static lv_obj_t *s_dsh_tok;    /* 今日 tokens 大数字 */
+static lv_obj_t *s_dsh_inout;  /* IN ... OUT ... */
+static lv_obj_t *s_dsh_cache;  /* CACHE ... | 命中率 */
+static lv_obj_t *s_dsh_cost;   /* ~CNY x.xx */
+static lv_obj_t *s_dsh_req;    /* REQ 值 */
+static lv_obj_t *s_dsh_proc;   /* "10 PROC" */
+static lv_obj_t *s_dsh_rss;    /* "RSS 906M  CPU 12%" */
+static lv_obj_t *s_dsh_week;   /* 底部 7 天汇总 */
+
+/* token 自动缩单位：<1000 原数；<1e6 用 K；否则 M。
+ * 小数位：K 最多 1 位、M 最多 2 位，末尾的 0 去掉（620K 比 620.0K 省横向空间）。
+ * 全部用整数运算：用 %f 的话 GCC 的 -Wformat-truncation 会按 double 的极端量级
+ * （300+ 字符）判"可能截断"，在 -Werror=all 下就是构建错误。 */
+static void fmt_tok(uint64_t n, char *buf, size_t len)
+{
+    if (n < 1000ULL) {
+        snprintf(buf, len, "%llu", (unsigned long long)n);
+    } else if (n < 995000ULL) { /* 995K 以上直接进位到 M，避免显示成 "1000K" */
+        unsigned long long k10 = (n + 50ULL) / 100ULL; /* 单位 0.1K，四舍五入 */
+        if (k10 % 10ULL == 0ULL) {
+            snprintf(buf, len, "%lluK", k10 / 10ULL);
+        } else {
+            snprintf(buf, len, "%llu.%lluK", k10 / 10ULL, k10 % 10ULL);
+        }
+    } else {
+        unsigned long long m100 = (n + 5000ULL) / 10000ULL; /* 单位 0.01M，四舍五入 */
+        if (m100 % 100ULL == 0ULL) {
+            snprintf(buf, len, "%lluM", m100 / 100ULL);
+        } else if (m100 % 10ULL == 0ULL) {
+            snprintf(buf, len, "%llu.%lluM", m100 / 100ULL, (m100 % 100ULL) / 10ULL);
+        } else {
+            snprintf(buf, len, "%llu.%02lluM", m100 / 100ULL, m100 % 100ULL);
+        }
+    }
+}
+
+/* 费用：估算是契约要求必须标出来的，用 ASCII `~` 代替字体里没有的"约等号"。
+ * 同样用整数分位输出，避开 %f 的 -Wformat-truncation。 */
+static void fmt_cost(float cost, char *buf, size_t len)
+{
+    if (!(cost > 0.0f)) { /* NaN / 负数都按 0 处理 */
+        cost = 0.0f;
+    }
+    if (cost > 1.0e6f) { /* 界面上限；估算金额本来也不该到百万级 */
+        cost = 1.0e6f;
+    }
+    unsigned long cents = (unsigned long)(cost * 100.0f + 0.5f);
+    snprintf(buf, len, "~CNY %lu.%02lu", cents / 100UL, cents % 100UL);
+}
+
+void ui_dsh_create(lv_obj_t *parent)
+{
+    /* ---- 左卡：今日 tokens ---- */
+    s_dsh_left = ui_card(parent, 4, 2, 150, 108);
+    ui_tag(s_dsh_left, &lv_font_montserrat_14, UI_COL_MUTED, 8, 4, "TOKENS TODAY");
+    s_dsh_tok = ui_tag(s_dsh_left, &lv_font_montserrat_28, UI_COL_CPU, 8, 22, "--");
+    s_dsh_inout = ui_tag(s_dsh_left, &lv_font_montserrat_14, UI_COL_MUTED, 8, 60, "IN --  OUT --");
+    s_dsh_cache = ui_tag(s_dsh_left, &lv_font_montserrat_14, UI_COL_MUTED, 8, 80, "CACHE --");
+
+    /* ---- 右卡：费用 / 请求数 / DSH 进程 ---- */
+    s_dsh_right = ui_card(parent, 158, 2, 158, 108);
+    s_dsh_cost = ui_tag(s_dsh_right, &lv_font_montserrat_20, UI_COL_NET, 0, 0, "--");
+    lv_obj_align(s_dsh_cost, LV_ALIGN_TOP_RIGHT, -8, 2);
+    ui_tag(s_dsh_right, &lv_font_montserrat_14, UI_COL_MUTED, 8, 32, "REQ");
+    s_dsh_req = ui_tag(s_dsh_right, &lv_font_montserrat_20, UI_COL_CPU, 0, 0, "--");
+    lv_obj_align(s_dsh_req, LV_ALIGN_TOP_RIGHT, -8, 28);
+    ui_tag(s_dsh_right, &lv_font_montserrat_14, UI_COL_MUTED, 8, 56, "DSH");
+    s_dsh_proc = ui_tag(s_dsh_right, &lv_font_montserrat_14, UI_COL_CPU, 0, 0, "--");
+    lv_obj_align(s_dsh_proc, LV_ALIGN_TOP_RIGHT, -8, 56);
+    s_dsh_rss = ui_tag(s_dsh_right, &lv_font_montserrat_14, UI_COL_MUTED, 8, 80, "--");
+
+    /* ---- 底部条：近 7 天滚动 ---- */
+    s_dsh_bottom = ui_card(parent, 4, 112, 312, 36);
+    s_dsh_week = ui_tag(s_dsh_bottom, &lv_font_montserrat_14, UI_COL_MUTED, 0, 0, "--");
+    lv_obj_center(s_dsh_week);
+
+    /* ---- 整页 N/A 覆盖层（默认隐藏） ---- */
+    s_dsh_na = ui_tag(parent, &lv_font_montserrat_28, UI_COL_DIM, 0, 0, "DSH N/A");
+    lv_obj_align(s_dsh_na, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(s_dsh_na, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_dsh_update(const stats_t *s, bool stale)
+{
+    bool valid = (s != NULL) && s->dsh.valid;
+
+    /* 帧里没带 dsh（老上位机 / 采集失败降级）：整页 "DSH N/A"，不留 0 */
+    if (!valid) {
+        lv_obj_add_flag(s_dsh_left, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_dsh_right, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_dsh_bottom, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_dsh_na, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    lv_obj_remove_flag(s_dsh_left, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_dsh_right, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_dsh_bottom, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_dsh_na, LV_OBJ_FLAG_HIDDEN);
+
+    const dsh_stats_t *d = &s->dsh;
+    char tok[48];
+    char in_s[48];
+    char out_s[48];
+    char sub[160];
+    char cost[48];
+
+    /* ---- 左卡：今日 tokens ---- */
+    fmt_tok(d->today_tok, tok, sizeof(tok));
+    lv_label_set_text(s_dsh_tok, tok);
+
+    fmt_tok(d->today_in, in_s, sizeof(in_s));
+    fmt_tok(d->today_out, out_s, sizeof(out_s));
+    snprintf(sub, sizeof(sub), "IN %s  OUT %s", in_s, out_s);
+    lv_label_set_text(s_dsh_inout, sub);
+
+    fmt_tok(d->today_cache, tok, sizeof(tok));
+    if (d->week_cache_pct == 0) {
+        /* 0% 多半是「没数据」，任务要求显示 -- */
+        snprintf(sub, sizeof(sub), "CACHE %s | --", tok);
+    } else {
+        snprintf(sub, sizeof(sub), "CACHE %s | %u%%", tok, (unsigned)d->week_cache_pct);
+    }
+    lv_label_set_text(s_dsh_cache, sub);
+
+    /* ---- 右卡：费用 / 请求数 / 进程 ---- */
+    fmt_cost(d->today_cost, cost, sizeof(cost));
+    lv_label_set_text(s_dsh_cost, cost);
+
+    if (d->today_req == UINT32_MAX) {
+        lv_label_set_text(s_dsh_req, "--");
+    } else {
+        snprintf(sub, sizeof(sub), "%u", (unsigned)d->today_req);
+        lv_label_set_text(s_dsh_req, sub);
+    }
+
+    bool proc_missing = (d->proc_count == UINT16_MAX);
+    if (proc_missing) {
+        lv_label_set_text(s_dsh_proc, "--");
+        lv_label_set_text(s_dsh_rss, "--");
+    } else {
+        snprintf(sub, sizeof(sub), "%u PROC", (unsigned)d->proc_count);
+        lv_label_set_text(s_dsh_proc, sub);
+
+        if (d->proc_rss_mb == UINT16_MAX) {
+            snprintf(sub, sizeof(sub), "RSS --  CPU %u%%", (unsigned)d->proc_cpu_pct);
+        } else {
+            snprintf(sub, sizeof(sub), "RSS %uM  CPU %u%%",
+                     (unsigned)d->proc_rss_mb, (unsigned)d->proc_cpu_pct);
+        }
+        lv_label_set_text(s_dsh_rss, sub);
+    }
+
+    /* ---- 底部条：近 7 天滚动（费用同样按估算标 ~） ---- */
+    char week_tok[48];
+    fmt_tok(d->week_tok, week_tok, sizeof(week_tok));
+    fmt_cost(d->week_cost, cost, sizeof(cost));
+    if (d->week_req == UINT32_MAX) {
+        snprintf(sub, sizeof(sub), "7D %s TOK | %s | -- REQ", week_tok, cost);
+    } else {
+        snprintf(sub, sizeof(sub), "7D %s TOK | %s | %u REQ",
+                 week_tok, cost, (unsigned)d->week_req);
+    }
+    lv_label_set_text(s_dsh_week, sub);
+
+    /* ---- 新鲜度：数值全部 fresh/stale 两态 ---- */
+    ui_text_color(s_dsh_tok, UI_COL_CPU, stale);
+    ui_text_color(s_dsh_inout, UI_COL_MUTED, stale);
+    ui_text_color(s_dsh_cache, UI_COL_MUTED, stale);
+    ui_text_color(s_dsh_cost, UI_COL_NET, stale);
+    ui_text_color(s_dsh_req, UI_COL_CPU, stale);
+    /* 进程在跑但本地 GUI 端口没监听 = 异常，用告警色（不是 stale 色） */
+    uint32_t proc_color = (!proc_missing && !d->proc_port_up && d->proc_count > 0)
+                          ? UI_COL_ALERT : UI_COL_CPU;
+    ui_text_color(s_dsh_proc, proc_color, stale);
+    ui_text_color(s_dsh_rss, UI_COL_MUTED, stale);
+    ui_text_color(s_dsh_week, UI_COL_MUTED, stale);
+}

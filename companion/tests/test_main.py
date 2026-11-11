@@ -36,3 +36,10 @@ def test_no_tray_flag_disables_tray():
     config = apply_overrides(Config(token="t"), args)
     assert config.tray_enabled is False
     assert apply_overrides(Config(token="t"), build_parser().parse_args([])).tray_enabled is True
+
+
+def test_no_dsh_flag_disables_dsh():
+    args = build_parser().parse_args(["--no-dsh"])
+    config = apply_overrides(Config(token="t"), args)
+    assert config.dsh_enabled is False
+    assert apply_overrides(Config(token="t"), build_parser().parse_args([])).dsh_enabled is True

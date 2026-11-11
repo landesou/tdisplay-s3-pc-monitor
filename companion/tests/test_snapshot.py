@@ -88,3 +88,15 @@ def test_json_keeps_utf8_hostname():
     snapshot = build_snapshot(make_sample(hostname="联想本本"), seq=1)
     line = to_json(snapshot)
     assert "联想本本" in line  # ensure_ascii=False，UTF-8 直出
+
+
+def test_dsh_field_is_optional():
+    payload = {
+        "today": {"tok": 1, "in": 1, "out": 0, "cache": 0, "req": 1, "cost": 0.0},
+        "week": {"tok": 1, "req": 1, "cache_pct": 0, "cost": 0.0},
+        "proc": {"count": 10, "rss_mb": 906, "cpu_pct": 12, "port_up": True},
+    }
+    with_dsh = build_snapshot(make_sample(), seq=1, dsh=payload)
+    assert with_dsh["dsh"] == payload
+    without = build_snapshot(make_sample(), seq=1)
+    assert "dsh" not in without  # 没数据时不塞字段（设备显示 --）
