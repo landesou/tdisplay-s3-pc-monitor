@@ -641,6 +641,36 @@ DSH 的 Web GUI 端口**每个会话都会变**（实测上午 10899、下午 86
 Windows SmartScreen 首次运行会提示"未知发布者"（未签名）；GUI 里 Wi-Fi SSID/密码为空是因为设备凭据
 存在设备 NVS（当初是串口配的），上位机配置里没有——不影响工作。
 
+### M16 GitHub Actions 自动打包 + Release（2026-11-12，已上线）
+
+用户要求「把 app 也更新到 GitHub」。exe 21 MB 不适合进 git（每次改就多 21 MB 历史），
+所以走标准做法：**CI 在 Windows runner 上构建，推 tag 自动挂 Release**。
+
+**结果**：`v1.3.0` Release 已生成，资产
+`pcmond.exe`（**20,676,882 B ≈ 19.7 MB**，CI 用 python.org 的 Python 打得比本地 conda 版小一点）。
+下载链接：`https://github.com/landesou/tdisplay-s3-pc-monitor/releases/download/v1.3.0/pcmond.exe`
+
+**Lead 独立复验**：把这个 CI 产物下载到**干净目录 + 最小 PATH（只有 System32/Windows，无 Python）**，
+`pcmond.exe --once` → exit 0，输出合法一帧 JSON（含真实 GPU 数据）。说明 CI 打的包和本地打的一样可用。
+
+**CI 失败了三轮才通过，三个坑都值得记**（都是"本地能跑、CI 不能"的典型）：
+
+1. **runner 控制台是 cp1252**：`make_icon.py` 里 `print("图标已生成：...")` 直接
+   `UnicodeEncodeError: 'charmap' codec can't encode`。修：workflow 里加 `PYTHONUTF8=1` /
+   `PYTHONIOENCODING=utf-8`。（本机是 GBK 环境，同样的中文 print 反而不报错。）
+2. **spec 里的 conda 依赖在 runner 上会"删了不补"**：为绕开本机 ModelSim 的旧 Tcl 8.6.5，
+   spec 会从 `a.binaries` 里删掉 tcl/tk 再从 conda `Library/bin` 补。CI 上没有 conda → 只删不补，
+   打出来的 exe 一启动 Tk 就崩；而 `--once` 冒烟测试跑的是 CLI，**发现不了**。修：
+   `if os.path.isdir(CONDA_LIB)` 守护，非 conda 环境保留 PyInstaller 自己的 tcl/tk。
+3. **windowed exe 在 PowerShell 里不会等待**：`$out = & exe --once` 立刻返回，
+   `$LASTEXITCODE` 是 `$null`，于是 `if ($null -ne 0)` 成立 → 假失败"退出码 "（空白）。
+   修：用 `cmd /c "exe --once > once.json 2> once.err"`（cmd 会等 GUI 进程退出、重定向给 stdout 真句柄），
+   失败时打印 stderr。
+
+**用法**：以后发版就 `git tag v1.3.1 && git push origin v1.3.1` → 自动构建并挂 Release；
+不带 tag 也可以在 Actions 页面手动 Run workflow（产物在 Artifacts 里）。
+GitHub API 在本机被墙，验证 Release 用的是「直接探资产 URL + 下载校验」（API 还有未登录限流）。
+
 ### 团队分工（2026-11-10 开工）
 
 | 成员 | 负责 | 写作用域 | 任务 |
