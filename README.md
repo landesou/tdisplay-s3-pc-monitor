@@ -206,6 +206,10 @@ bash tools/build.sh flash COM10   # 端口换成你的
 
 **① 打包版（推荐给使用者）**：`companion/dist/pcmond.exe`（单文件约 21 MB，自带 Python 运行时）。
 
+> exe 不进 git（21 MB 二进制会撑大每个提交），而是由 **GitHub Actions 自动打包**：
+> 到 [Releases](https://github.com/landesou/tdisplay-s3-pc-monitor/releases) 下载现成的 `pcmond.exe`；
+> 或本地 `powershell -File companion/packaging/build_exe.ps1` 自己构建。
+
 - 双击 → 弹出设置/状态窗口（Wi-Fi、端口、Token、DSH 开关、开机自启都在里面），后台照常采集+双链路+托盘；
 - 命令行也还能用：`pcmond.exe --once`、`--no-usb`、`--no-http`；
 - 目标机器**不需要装 Python**。自己构建：`powershell -File companion/packaging/build_exe.ps1`
