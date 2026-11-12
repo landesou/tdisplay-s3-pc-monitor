@@ -20,7 +20,7 @@ LOG_PATH = HOME_DIR / "pcmond.log"
 
 DEFAULT_PORT = 8787
 TOKEN_BYTES = 18  # token_urlsafe(18) → 24 个 URL 安全字符
-DEFAULT_DSH_PORT = 10899  # DSH GUI 端口（契约 §2.5 的 proc.port_up）
+DEFAULT_DSH_PORT = 0  # 0 = 自动探测 DSH Web GUI 端口（候选 8679/10899）；非 0 只用该端口
 # DSH 费用估算单价（元 / 百万 tokens，**高峰期**）；空闲价 = 一半。
 # 来源：DeepSeek 官方价目表（2026-11 查），模型未命中则回退到 deepseek-flash。
 DEFAULT_DSH_PRICING: Dict[str, Dict[str, float]] = {
@@ -68,6 +68,7 @@ class Config:
     # 可选：设备 hello 请求配置时，通过 USB 下发写 NVS（架构 §4）
     wifi_ssid: Optional[str] = None
     wifi_pass: Optional[str] = None
+    api_url: Optional[str] = None  # 可手改；None = 自动用 http://<局域网IP>:<port>/api/stats
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "Config":
@@ -108,13 +109,13 @@ class Config:
         config.usb_hz = _clamp(_pick(raw, "usb_hz", config.usb_hz, float), 1.0, 2.0)
         config.dsh_enabled = _pick(raw, "dsh_enabled", config.dsh_enabled, _as_bool)
         dsh_port = _pick(raw, "dsh_port", config.dsh_port, int)
-        config.dsh_port = dsh_port if 1 <= dsh_port <= 65535 else DEFAULT_DSH_PORT
+        config.dsh_port = dsh_port if 0 <= dsh_port <= 65535 else DEFAULT_DSH_PORT
         if config.dsh_port != dsh_port:
-            LOGGER.warning("dsh_port %s 非法，改用默认 %s", dsh_port, DEFAULT_DSH_PORT)
+            LOGGER.warning("dsh_port %s 非法，改用 %s（0=自动探测）", dsh_port, DEFAULT_DSH_PORT)
         config.dsh_pricing = _load_pricing(raw.get("dsh_pricing"), config.dsh_pricing)
-        for key in ("wifi_ssid", "wifi_pass"):
+        for key in ("wifi_ssid", "wifi_pass", "api_url"):
             value = _pick(raw, key, None, str)
-            setattr(config, key, str(value) if value else None)
+            setattr(config, key, str(value).strip() or None if value else None)
 
         if config.token != str(raw.get("token", "")):
             config.save(target)  # 自动补了 Token，立刻落盘
@@ -139,6 +140,7 @@ class Config:
             "dsh_pricing": self.dsh_pricing,
             "wifi_ssid": self.wifi_ssid,
             "wifi_pass": self.wifi_pass,
+            "api_url": self.api_url,
         }
         temporary = target.with_suffix(target.suffix + ".tmp")
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

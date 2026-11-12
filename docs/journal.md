@@ -598,6 +598,49 @@ WiFi 验证表格）和**真实的 Bearer Token**（写死在 `companion/tests/t
 
 **帧长**：带 dsh+rate 实测 **672–797 B**（不同序列化口径），仍在 1 KB 契约 / 1024 B 缓冲内。
 
+### M15 PC 端桌面化：pcmond.exe + GUI（2026-11-12 实机验收）
+
+用户问「没有做成一个 app 那种东西吗」——确实：功能是全的，但交付形态还是「Python 脚本 + 托盘」，
+别人要用得先装 Python、建 venv、跑 ps1。这一轮补齐成**双击即用的桌面 app**。
+
+**交付**：
+
+- `companion/dist/pcmond.exe`：**PyInstaller 单文件 20.96 MiB**（21,973,000 B），windowed + 自绘图标，
+  目标机器**不需要 Python**；`dist/`、`build/` 已 gitignore（不进仓库）。
+- `pcmond/gui.py`(244) + `gui_widgets.py`(191) + `gui_util.py`(210) + `runtime.py`(170) + `autostart.py`(98)：
+  GUI 只是壳——`PcmondRuntime` 统一编排现有 sampler / usb_link / http_link / tray / dsh，
+  **CLI 和 GUI 共用同一个 stop() 优雅停路径**，没有重写采集。
+- 窗口内含：链路/帧龄/HTTP/今日 token+费用+REQ+缓存命中/近 7 天/DSH 进程+峰谷徽标/设备状态；
+  设置区可改 Wi-Fi、HTTP 端口、采集间隔、API URL、串口、DSH 开关与端口、Bearer Token（默认打码，
+  可显示/重生成/复制）；底部开机自启勾选、打开配置目录/日志、退出。
+- CLI 兼容：`pcmond.exe --once` / `--no-usb` / `--no-http` 照旧；源码态 `python -m pcmond` 仍是 CLI，
+  `--gui` 起窗口。
+
+**打包踩到两个真坑（都写进 spec 解决）**：
+
+1. **Tcl/Tk 版本冲突**：本机 PATH 里有 ModelSim 的旧 Tcl 8.6.5，PyInstaller 按依赖搜索把它打进了包，
+   而数据是 conda 的 8.6.15 → 启动报 `version conflict for package "Tcl": have 8.6.5, need exactly 8.6.15`。
+   spec 里过滤误打包的 tcl/tk/zlib，显式换成 conda `Libraryin` 的版本。
+2. **conda 运行时 DLL 缺失**：`_ctypes` 报 `DLL load failed`——ffi/lzma/bz2/expat/ssl 都在 conda
+   `Library/bin`（不在 PyInstaller 的搜索路径），spec `binaries` 显式带上。
+
+**验收（Lead 独立复验，不是听汇报）**：
+- 把 exe 拷到 `D:\AI_vibe\_scratchpptest`（**无 venv、无 python**）启动 → 窗口标题
+  `pcmond 0.1.0 · T-Display-S3 监控`、`/health` HTTP 200、`seq` 递增、DSH 数字有值、托盘绿；
+- 截图确认界面（今日 tokens 110.1M / ≈7.82 元 / DSH 9 进程 / **端口 自动→8679** / **▲ PEAK ×2 · 36 min 后转 OFF**）；
+- 关窗口 → 进程消失、8787 无监听、**COM10 自动释放**（优雅停）；
+- pytest：基础 python **143 passed / 1 skipped**（原 119 不退化，+15 GUI 纯函数 +9 端口探测）。
+
+**验收中发现并修掉的问题：DSH GUI 端口写死导致永远 "端口 down"**。
+DSH 的 Web GUI 端口**每个会话都会变**（实测上午 10899、下午 8679），而配置默认写死 10899。
+解法：`dsh_port=0` 表示**自动探测**（候选 8679 / 10899，TCP connect + 一次极简 `GET /` 确认是 Web 服务，
+401/403 也算；命中后缓存、服务消失即重扫、全失败 20 s 内不重扫）；`proc` 新增 `port` 字段（0=无）。
+**没有用 `DSH_WEB_URL` 环境变量**——用户双击 exe 是 Explorer 起的进程，不继承 DSH 的 shell 环境。
+
+**已知限制**：exe 不进仓库（21 MB），要用就自己 `build_exe.ps1` 构建，或让作者在 GitHub Release 里挂；
+Windows SmartScreen 首次运行会提示"未知发布者"（未签名）；GUI 里 Wi-Fi SSID/密码为空是因为设备凭据
+存在设备 NVS（当初是串口配的），上位机配置里没有——不影响工作。
+
 ### 团队分工（2026-11-10 开工）
 
 | 成员 | 负责 | 写作用域 | 任务 |

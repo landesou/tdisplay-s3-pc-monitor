@@ -44,15 +44,28 @@ REFRESH_S = 5.0
 SESSION_GLOB = "session*.jsonl.zstd"
 PROC_NAME_KEYWORD = "deepseek harness"
 PROC_CPU_WARMUP_S = 0.12
-PORT_PROBE_TIMEOUT_S = 0.15
 MIB = 1024 * 1024
+# DSH Web GUI 的端口**每个会话都可能变**（实测上午 10899、下午 8679），所以 dsh_port=0 时
+# 按这个候选集自动探测；非 0 配置仍然只用指定端口。
+DEFAULT_DSH_PORTS = (8679, 10899)
+PORT_CONNECT_TIMEOUT_S = 0.12
+PORT_HTTP_TIMEOUT_S = 0.25
+PORT_RESCAN_INTERVAL_S = 20.0  # 全部候选都失败后，隔这么久再扫一次（别每 5 s 都扫）
 
 
-def _port_listening(port: int, host: str = "127.0.0.1", timeout: float = PORT_PROBE_TIMEOUT_S) -> bool:
-    """TCP 探测本机端口是否在监听（比 psutil.net_connections 快，也不需要额外权限）。"""
+def probe_web_service(port: int, host: str = "127.0.0.1") -> bool:
+    """先 TCP connect，再发一次极简 HTTP 请求确认对端确实是 Web 服务（防把别的程序误判成 DSH）。
+
+    对端要求很低：返回头以 `HTTP/` 开头就算（401/403 等鉴权失败也算 Web 服务）。
+    连接失败/超时/非 HTTP 一律 False，不抛异常。
+    """
     try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
+        with socket.create_connection((host, port), timeout=PORT_CONNECT_TIMEOUT_S) as sock:
+            sock.settimeout(PORT_HTTP_TIMEOUT_S)
+            request = f"GET / HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n".encode("ascii")
+            sock.sendall(request)
+            head = sock.recv(64)
+            return head.startswith(b"HTTP/")
     except OSError:
         return False
 
@@ -71,7 +84,9 @@ class DshSampler:
         self._root = Path(sessions_root) if sessions_root is not None else SESSIONS_ROOT
         self._cache_path = Path(cache_path) if cache_path is not None else CACHE_PATH
         self._pricing = normalize_pricing(pricing)
-        self.port = int(port)
+        self.port = int(port)  # 0 = 自动探测；非 0 = 只用这个端口
+        self._detected_port = 0
+        self._last_port_scan = 0.0
         self.refresh_s = max(0.1, float(refresh_s))
         self._lock = threading.Lock()
         self._latest: Optional[Dict[str, Any]] = None
@@ -156,7 +171,7 @@ class DshSampler:
 
         payload: Optional[Dict[str, Any]] = None
         if buckets:
-            payload = build_payload(buckets, today, self._collect_proc(), now)
+            payload = build_payload(buckets, today, self._collect_proc(now), now)
         else:
             LOGGER.debug("DSH：近 %d 天没有可用 token 记录，本帧不带 dsh 字段", WEEK_DAYS)
         with self._lock:
@@ -185,7 +200,31 @@ class DshSampler:
 
     # ---- 进程 ----
 
-    def _collect_proc(self) -> Dict[str, Any]:
+    # ---- 进程 / 端口 ----
+
+    def _detect_port(self, now: float) -> int:
+        """探测 DSH Web GUI 端口并缓存：0=自动（候选 8679/10899），非 0=只用指定端口。"""
+        if self.port:
+            return self.port if probe_web_service(self.port) else 0
+        # 自动模式：命中过的端口每个刷新周期验证一次；服务消失则立刻清缓存重扫
+        if self._detected_port:
+            if probe_web_service(self._detected_port):
+                self._last_port_scan = now
+                return self._detected_port
+            self._detected_port = 0
+            self._last_port_scan = 0.0
+        # 全部失败后节流：间隔 PORT_RESCAN_INTERVAL_S 再扫，避免每 5 s 白跑
+        if self._last_port_scan and now - self._last_port_scan < PORT_RESCAN_INTERVAL_S:
+            return 0
+        self._last_port_scan = now
+        for candidate in DEFAULT_DSH_PORTS:
+            if probe_web_service(candidate):
+                self._detected_port = candidate
+                return candidate
+        return 0
+
+    def _collect_proc(self, now: Optional[float] = None) -> Dict[str, Any]:
+        now = time.time() if now is None else float(now)
         count = 0
         rss_bytes = 0.0
         cpu_pct = 0.0
@@ -226,11 +265,18 @@ class DshSampler:
         except Exception:  # noqa: BLE001
             LOGGER.exception("统计 DSH 进程 CPU 失败")
 
+        try:
+            detected_port = self._detect_port(now)
+        except Exception:  # noqa: BLE001 - 端口探测失败不能影响进程/token 等其它字段
+            LOGGER.exception("DSH 端口探测失败")
+            detected_port = 0
+
         return {
             "count": count,
             "rss_mb": int(round(rss_bytes / MIB)),
             "cpu_pct": int(round(cpu_pct)),
-            "port_up": _port_listening(self.port),
+            "port": int(detected_port),
+            "port_up": bool(detected_port),
         }
 
     # ---- 缓存 ----

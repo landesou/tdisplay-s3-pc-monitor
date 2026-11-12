@@ -202,6 +202,17 @@ bash tools/build.sh flash COM10   # 端口换成你的
 
 ### 4) 启动上位机
 
+上位机有两种形态，**只想用、不想碰 Python 的话用第 2 种**：
+
+**① 打包版（推荐给使用者）**：`companion/dist/pcmond.exe`（单文件约 21 MB，自带 Python 运行时）。
+
+- 双击 → 弹出设置/状态窗口（Wi-Fi、端口、Token、DSH 开关、开机自启都在里面），后台照常采集+双链路+托盘；
+- 命令行也还能用：`pcmond.exe --once`、`--no-usb`、`--no-http`；
+- 目标机器**不需要装 Python**。自己构建：`powershell -File companion/packaging/build_exe.ps1`
+  （详见 [`companion/README.md`](companion/README.md) 的「打包版」一节）。
+
+**② 源码版（开发者/想改代码）**：
+
 ```powershell
 cd companion
 powershell -ExecutionPolicy Bypass -File .\setup.ps1   # 建 .venv，装 psutil / pyserial

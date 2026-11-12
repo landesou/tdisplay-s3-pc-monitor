@@ -72,7 +72,7 @@ def test_save_roundtrip(tmp_path):
 def test_dsh_defaults(tmp_path):
     config = Config.load(tmp_path / "config.json")
     assert config.dsh_enabled is True
-    assert config.dsh_port == 10899
+    assert config.dsh_port == 0  # 0 = 自动探测 DSH Web GUI 端口（会随会话变）
     assert config.dsh_pricing["deepseek-flash"] == {"cache_hit": 0.04, "cache_miss": 2.0, "output": 8.0}
 
 
@@ -111,5 +111,22 @@ def test_dsh_invalid_pricing_and_port_are_ignored(tmp_path):
         encoding="utf-8",
     )
     config = Config.load(path)
-    assert config.dsh_port == 10899
+    assert config.dsh_port == 0  # 0 = 自动探测（默认）
     assert config.dsh_pricing["deepseek-flash"]["cache_miss"] == 2.0  # 非法值被忽略
+
+
+def test_dsh_port_zero_means_auto_and_nonzero_kept(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"token": "t", "dsh_port": 0}), encoding="utf-8")
+    assert Config.load(path).dsh_port == 0
+    path.write_text(json.dumps({"token": "t", "dsh_port": 8679}), encoding="utf-8")
+    assert Config.load(path).dsh_port == 8679
+
+
+def test_api_url_roundtrip(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"token": "t", "api_url": " http://10.0.0.5:9000/api/stats "}), encoding="utf-8")
+    config = Config.load(path)
+    assert config.api_url == "http://10.0.0.5:9000/api/stats"
+    Config(token="t", api_url=None).save(path)
+    assert Config.load(path).api_url is None

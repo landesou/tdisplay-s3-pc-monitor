@@ -1,25 +1,33 @@
-"""pcmond 入口：参数解析、日志、采集线程 + USB/HTTP 两条传输链路。"""
+"""pcmond 入口：参数解析、日志、CLI 常驻 / --once / 图形界面。
+
+- 源码运行：`python -m pcmond` 是 CLI 常驻（与原行为一致），`--gui` 起设置/状态窗口；
+- 打包成 exe（PyInstaller onefile/windowed）：无参数双击 → GUI；带参数（`--once`、`--no-usb` 等）→ CLI。
+"""
 
 from __future__ import annotations
 
 import argparse
 import logging
 import logging.handlers
+import os
 import platform
 import sys
-import threading
 import time
 from typing import Any, Dict, List, Optional
 
 from . import __version__
 from .collectors import Collector
 from .config import CONFIG_PATH, LOG_PATH, Config
-from .http_link import HttpLink
-from .sampler import Sampler
+from .runtime import PcmondRuntime
 from .snapshot import build_snapshot, to_json
 
 LOGGER = logging.getLogger("pcmond")
 WARMUP_SECONDS = 0.25
+
+
+def is_frozen() -> bool:
+    """是否运行在 PyInstaller 单文件 exe 里。"""
+    return bool(getattr(sys, "frozen", False))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="pcmond",
         description="T-Display-S3 PC 性能监控上位机（采集 + USB/HTTP 双传输）",
     )
+    parser.add_argument("--gui", action="store_true", help="启动图形设置/状态窗口（打包版无参数时默认 GUI）")
     parser.add_argument("--once", action="store_true", help="采集并打印一帧 JSON 后退出")
     parser.add_argument("--verbose", action="store_true", help="输出 DEBUG 日志")
     parser.add_argument("--port", type=int, help="HTTP 端口（默认 8787，仅本次生效）")
@@ -88,6 +97,42 @@ def setup_logging(verbose: bool, once: bool) -> None:
         root.addHandler(console)
 
 
+def _attach_console() -> None:
+    """frozen + windowed（无控制台）时，让 `pcmond.exe --once` 等 CLI 用法仍能输出。
+
+    优先复用父进程继承下来的 stdout/stderr 句柄（cmd/PowerShell 重定向、管道都能工作）；
+    拿不到时再 AttachConsole 附着到父控制台。
+    """
+    if os.name != "nt" or not is_frozen():
+        return
+    try:
+        import ctypes
+        import msvcrt
+
+        for std_handle, name in ((-11, "stdout"), (-12, "stderr")):
+            handle = ctypes.windll.kernel32.GetStdHandle(std_handle)
+            if handle in (0, -1, None):
+                continue
+            try:
+                fd = msvcrt.open_osfhandle(handle, os.O_WRONLY)
+                stream = open(fd, "w", encoding="utf-8", errors="replace", buffering=1, closefd=True)
+                setattr(sys, name, stream)
+            except OSError:
+                continue
+    except Exception:  # noqa: BLE001 - 控制台只是尽量恢复，失败不影响功能
+        pass
+    if sys.stdout is not None:
+        return
+    try:
+        import ctypes
+
+        if ctypes.windll.kernel32.AttachConsole(-1):
+            sys.stdout = open("CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1)
+            sys.stderr = open("CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run_once(config: Config) -> int:
     """采一帧打印到 stdout 后退出（验收用，不连串口/不开端口）。"""
     collector = Collector()
@@ -99,9 +144,14 @@ def run_once(config: Config) -> int:
     line = to_json(snapshot)
     stream = sys.stdout or sys.stderr
     if stream is not None:
-        stream.write(line + "\n")
-        stream.flush()
-    else:  # pythonw 下两个流都没了
+        try:
+            stream.write(line + "\n")
+            stream.flush()
+        except (OSError, ValueError):
+            pass
+    if not line:
+        LOGGER.info("--once 无输出流")
+    elif stream is None:  # pythonw / 无控制台
         LOGGER.info("--once 输出：%s", line)
     LOGGER.info(
         "--once 完成：%d 字节，gpu=%s，dsh=%s",
@@ -128,6 +178,7 @@ def _collect_dsh_once(config: Config) -> Optional[Dict[str, Any]]:
 
 
 def run_daemon(config: Config) -> int:
+    """CLI 常驻模式（源码 `python -m pcmond` / exe 带参数）。"""
     LOGGER.info(
         "pcmond %s 启动（Python %s，%s）",
         __version__,
@@ -137,124 +188,50 @@ def run_daemon(config: Config) -> int:
     LOGGER.info("配置文件：%s", CONFIG_PATH)
     LOGGER.info("Bearer Token：%s", config.token)
 
-    stop_event = threading.Event()
-    sampler: Optional[Sampler] = None
-    dsh_sampler: Optional[Any] = None
-    http_link: Optional[HttpLink] = None
-    usb_link: Optional[Any] = None
-    tray_icon: Optional[Any] = None
-
+    runtime = PcmondRuntime(config)
     try:
-        # DSH 统计较贵：独立线程每 5 s 刷新一次，1 Hz 发帧只读 latest() 缓存
-        if config.dsh_enabled:
-            try:
-                from .dsh import DshSampler
-
-                dsh_sampler = DshSampler(pricing=config.dsh_pricing, port=config.dsh_port)
-                dsh_sampler.start()
-                LOGGER.info("DSH 采集线程已启动（%.0f s/刷新，端口 %d）", dsh_sampler.refresh_s, config.dsh_port)
-            except Exception:  # noqa: BLE001 - DSH 是附加数据，失败不能让主进程退出
-                LOGGER.exception("DSH 采集启动失败，帧里将不带 dsh 字段")
-                dsh_sampler = None
-        else:
-            LOGGER.info("DSH 采集已关闭（--no-dsh / dsh_enabled=false）")
-
-        sampler = Sampler(
-            config.interval_s,
-            dsh_provider=dsh_sampler.latest if dsh_sampler is not None else None,
-        )
-        sampler.start()
-        LOGGER.info("采集线程已启动（%.2f s/帧）", sampler.interval_s)
-
-        if config.http_enabled:
-            http_link = HttpLink(sampler.latest, config.token, port=config.port, host=config.host)
-            if not http_link.start():
-                LOGGER.warning("HTTP 链路未启动（端口冲突？），采集与 USB 继续")
-        else:
-            LOGGER.info("HTTP 链路已按参数关闭")
-
-        if config.usb_enabled:
-            try:
-                from .usb_link import UsbLink
-
-                usb_link = UsbLink(sampler, config)
-                usb_link.start()
-                LOGGER.info("USB 链路线程已启动（%s）", f"指定 {config.serial}" if config.serial else "自动发现 VID_303A")
-            except ImportError as exc:
-                LOGGER.error("未安装 pyserial，USB 链路不可用：%s", exc)
-        else:
-            LOGGER.info("USB 链路已按参数关闭")
-
-        tray_icon = _start_tray(config, sampler, http_link, usb_link, stop_event)
-
-        # 托盘「退出」会 set stop_event；Ctrl+C 走下面分支，两者都优雅退出
-        while not stop_event.wait(1.0):
+        runtime.start()
+        # 托盘「退出」/ GUI 关闭都会 set stop_event，这里统一走 runtime.stop()
+        while not runtime.stop_event.wait(1.0):
             pass
     except KeyboardInterrupt:
         LOGGER.info("收到 Ctrl+C，开始退出")
     finally:
-        if tray_icon is not None:
-            tray_icon.stop()
-        if usb_link is not None:
-            usb_link.stop()
-        if http_link is not None:
-            http_link.stop()
-        if sampler is not None:
-            sampler.stop()
-        if dsh_sampler is not None:
-            dsh_sampler.stop()
+        runtime.stop()
         LOGGER.info("pcmond 已退出")
     return 0
 
 
-def _start_tray(
-    config: Config,
-    sampler: Sampler,
-    http_link: Optional[HttpLink],
-    usb_link: Optional[Any],
-    stop_event: threading.Event,
-) -> Optional[Any]:
-    """托盘是可选功能：依赖缺失/启动失败都只记日志，返回 None 继续无托盘运行。"""
-    if not config.tray_enabled:
-        LOGGER.info("系统托盘已按配置/参数关闭（--no-tray）")
-        return None
+def run_gui(config: Config) -> int:
+    """图形界面模式；tkinter 缺失/无显示器时优雅报错，不影响 CLI。"""
     try:
-        from .netinfo import lan_ip
-        from .tray import TrayIcon, TrayStatus
-    except ImportError as exc:  # 防御性兜底：tray 模块内部已处理可选依赖
-        LOGGER.warning("托盘模块不可用：%s；继续无托盘运行", exc)
-        return None
-
-    bound_port = http_link.bound_port if http_link is not None and http_link.bound_port else config.port
-    base_url = f"http://{lan_ip() or '127.0.0.1'}:{bound_port}"
-
-    def status_provider() -> "TrayStatus":
-        snapshot = sampler.latest()
-        return TrayStatus(
-            usb_connected=bool(usb_link is not None and usb_link.connected),
-            usb_port=usb_link.port_name if usb_link is not None else config.serial,
-            http_running=bool(http_link is not None and http_link.running),
-            http_port=bound_port,
-            http_url=base_url,
-            seq=snapshot.get("seq") if snapshot else None,
-            last_frame_epoch=snapshot.get("t") if snapshot else None,
-            interval_s=config.interval_s,
-            token=config.token,
-        )
-
-    tray_icon = TrayIcon(status_provider, stop_event.set, config_dir=CONFIG_PATH.parent, log_path=LOG_PATH)
-    if not tray_icon.start():
-        return None
-    return tray_icon
+        from .gui import launch
+    except ImportError as exc:
+        LOGGER.error("图形界面不可用（缺 tkinter？）：%s；CLI 用法不受影响（如 --once）", exc)
+        return 2
+    try:
+        return launch(config)
+    except Exception:  # noqa: BLE001 - 无显示器/headless 等
+        LOGGER.exception("图形界面启动失败；CLI 用法不受影响（如 --once）")
+        return 1
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:]) if argv is None else list(argv)
+    args = build_parser().parse_args(raw_argv)
     config = Config.load()
     config = apply_overrides(config, args)
     setup_logging(args.verbose, args.once)
+
+    # 打包版无参数 → GUI（双击即用）；带任何参数 → 保持 CLI 行为；源码运行必须显式 --gui
+    gui_mode = args.gui or (is_frozen() and not raw_argv)
+    if not gui_mode:
+        _attach_console()
+
     if args.once:
         return run_once(config)
+    if gui_mode:
+        return run_gui(config)
     return run_daemon(config)
 
 

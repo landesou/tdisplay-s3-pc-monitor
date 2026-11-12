@@ -11,6 +11,8 @@
 - 可选**系统托盘**（pystray + Pillow）：状态圆点 + 右键菜单，没装依赖自动降级、不影响运行。
 - 可选 **DSH 数据源**：扫 `~/.dsh/sessions` 统计 token 消耗（今日/近 7 天 + 费用估算）+ DSH 进程监控，
   帧里加契约 §2.5 的 `dsh` 对象；独立线程 5 s 刷新，没有数据时不发该字段。
+- 可选 **图形界面**（tkinter，标准库）：状态 + 设置窗口；打包成单文件 `pcmond.exe` 后双击即用，
+  目标机器**不用装 Python**（见「打包版」一节）。
 - 不需要管理员权限、不装驱动、不改系统设置。
 
 ## 目录结构
@@ -30,8 +32,15 @@ companion/
 │   ├── tray.py         # 可选：系统托盘（pystray/Pillow，状态圆点 + 右键菜单）
 │   ├── dsh.py          # DSH 采集：会话日志缓存 + 进程/端口统计 + 5 s 刷新线程
 │   ├── dsh_parse.py    # DSH 日志解析：zstd JSONL → 按天 token/费用（纯函数）
-│   └── main.py         # argparse / 日志 / 进程编排
-├── tests/              # pytest（差分、Token、JSON 契约、GPU、预热、队列、托盘、DSH）
+│   ├── runtime.py      # 采集+双链路+DSH+托盘 的统一编排（CLI 与 GUI 共用）
+│   ├── gui.py          # tkinter 设置/状态窗口（GUI 只是壳，复用 runtime）
+│   ├── gui_util.py     # GUI 纯函数（格式化/校验/文案，可单测）
+│   ├── autostart.py    # 开机自启（打包版写 HKCU Run；源码版用启动文件夹脚本）
+│   └── main.py         # argparse / 日志 / CLI / --gui / frozen 判定
+├── packaging/          # PyInstaller 打包（spec、入口、图标生成、build_exe.ps1）
+├── assets/pcmond.ico   # 程序化生成的图标（build 时自动生成，1024/256/… 多尺寸）
+├── dist/pcmond.exe     # 打包产物（gitignore，构建后出现）
+├── tests/              # pytest（差分、Token、JSON 契约、GPU、预热、队列、托盘、DSH、GUI 纯函数）
 ├── requirements.txt    # psutil / pyserial / zstandard
 ├── requirements-tray.txt  # 可选托盘依赖（默认不装）
 ├── setup.ps1           # 创建 .venv 并装依赖（-WithTray 加托盘）
@@ -67,6 +76,9 @@ C:\Users\Lenovo\miniconda3\python.exe -m pip install -r requirements-tray.txt   
 ## 运行
 
 ```powershell
+# 0) 图形界面（设置 + 状态；开发态用这个）
+.\.venv\Scripts\python.exe -m pcmond --gui
+
 # 1) 验证采集：打印一帧 JSON 后退出（不连串口、不开端口）
 .\.venv\Scripts\python.exe -m pcmond --once
 
@@ -81,6 +93,7 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 
 | 参数 | 说明 |
 |---|---|
+| `--gui` | 启动图形设置/状态窗口（源码模式默认仍是 CLI；打包版无参数时默认 GUI） |
 | `--once` | 采集一帧打印到 stdout 后退出 |
 | `--verbose` | DEBUG 日志 |
 | `--port 8787` | 覆盖 HTTP 端口 |
@@ -92,6 +105,36 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 | `--interval 1.0` | 采集周期（秒，≥0.2） |
 
 日志写到 `%USERPROFILE%\.tdisplay-pcmon\pcmond.log`（1 MB × 3 轮转，UTF-8）。
+
+## 打包版（pcmond.exe）
+
+给**不想装 Python 的人**用的桌面版：单文件 exe + tkinter 设置/状态窗口，双击即可。
+
+```powershell
+# 构建（需要一台装有 Python + .venv 的机器，只有构建需要）
+cd D:\AI_vibe\tdisplay-s3-pc-monitor
+powershell -ExecutionPolicy Bypass -File companion\packaging\build_exe.ps1
+
+# 产物
+companion\dist\pcmond.exe
+```
+
+- `build_exe.ps1` 会：装构建依赖 PyInstaller → 用 PIL **程序化生成** `assets\pcmond.ico`
+  （深色底 + 青色屏幕/CPU 柱，多尺寸，不引用外部图片）→ `PyInstaller --onefile --windowed --icon` 打包。
+  加 `-SkipInstall` 可跳过 PyInstaller 安装步骤（已装过时更快）。
+- **体积约 20–30 MB**（单文件含 Python 运行时 + psutil/pyserial/zstandard/Pillow/pystray/tkinter）。
+- 用法：
+  - **双击 `pcmond.exe`** → 弹出设置/状态窗口，后台同时跑采集 + USB/HTTP + 托盘；
+  - `pcmond.exe --once` / `--no-usb` / `--no-http` / `--no-dsh` / `--verbose` 等命令行用法照旧；
+  - 首次运行同样在 `%USERPROFILE%\.tdisplay-pcmon\config.json` 生成配置与 Token；
+  - 窗口里可改 Wi-Fi/端口/间隔/Token/API URL/串口/DSH，点「保存并应用」只重启链路、不重启进程；
+  - 底部「开机自启」在打包版写 `HKCU\...\Run`（不需要管理员），源码版复用启动文件夹脚本。
+- 关窗口 = 优雅停（停托盘/USB/HTTP/采集/DSH），和托盘右键「退出」是同一条路径；**不要用任务管理器强杀**
+  （强杀可能把 ESP32 的 USB CDC 搞挂，需要拔插恢复）。
+- 打包版与脚本版共用同一份配置/日志/数据目录，可以混用；不想装环境的人只拷 `pcmond.exe` 即可，
+  卸载 = 删 exe（配置在 `%USERPROFILE%\.tdisplay-pcmon`，自启项可在窗口里取消）。
+- Windows 首次运行可能弹 SmartScreen「已保护你的电脑」（未签名 exe 的正常提示），
+  点「更多信息 → 仍要运行」即可；公司电脑策略禁用未签名 exe 时无解，请用脚本版。
 
 ## 配置文件
 
@@ -109,10 +152,11 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
   "interval_s": 1.0,
   "usb_hz": 1.0,
   "dsh_enabled": true,
-  "dsh_port": 10899,
+  "dsh_port": 0,
   "dsh_pricing": {
     "deepseek-flash": {"cache_hit": 0.04, "cache_miss": 2.0, "output": 8.0}
   },
+  "api_url": null,
   "wifi_ssid": null,
   "wifi_pass": null
 }
@@ -120,12 +164,18 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 
 - `serial: null` = 自动发现；也可以写死 `"COM7"`。
 - `usb_hz` 契约要求 1–2 Hz，超出会被夹到边界。
-- `dsh_enabled` / `dsh_port` / `dsh_pricing`：DSH 数据源开关、GUI 端口（用于 `proc.port_up` 探测）、
-  费用单价（元/百万 tokens，**高峰期**价格；空闲自动半价）。价格表按模型覆盖，未覆盖的键沿用默认，
+- `dsh_enabled` / `dsh_port` / `dsh_pricing`：DSH 数据源开关、GUI 端口、费用单价
+  （元/百万 tokens，**高峰期**价格；空闲自动半价）。价格表按模型覆盖，未覆盖的键沿用默认，
   未知模型回退到 `deepseek-flash`；改价格表会自动作废旧解析缓存。
+- `dsh_port=0`（默认）= **自动探测** DSH Web GUI 端口：DSH 的 GUI 端口每个会话都可能变
+  （实测上午 10899、下午 8679），候选 `8679 / 10899` 逐个探测；非 0 = 只用指定端口，不再探测。
+  GUI 的「DSH 端口」默认显示「自动」（留空/`自动`/`0` 同义）；状态区会显示 `端口 自动→8679`
+  或 `端口 自动·未探测到`。
 - `wifi_ssid` / `wifi_pass` 是可选项：填了之后，设备通过 USB 发 `{"t":"hello","need_cfg":1}` 时，
   pcmond 会回一帧 `{"t":"cfg","wifi_ssid":...,"wifi_pass":...,"api_token":...,"api_url":...}`
   让设备写 NVS 并重启（架构 §4 的推荐配置路径）。`api_url` 自动取本机局域网 IP。
+- `api_url`：可选，手动覆盖下发给设备的 URL；`null` 时自动用 `http://<本机局域网IP>:<port>/api/stats`
+  （GUI 设置区可改，改后点「保存并应用」生效）。
 - **删掉 config.json 会重新生成 Token**，设备 NVS 里的 `api_token` 也要跟着改。
 
 ## HTTP 接口
@@ -204,7 +254,10 @@ curl.exe -H "Authorization: Bearer $token" http://127.0.0.1:8787/api/stats
 - `proc.count` = 进程名含 `DeepSeek Harness` 的进程数（psutil 枚举）；
 - `proc.rss_mb` = 这些进程 RSS 合计（MiB 取整）；
 - `proc.cpu_pct` = 各进程 `cpu_percent(interval=None)` 之和（psutil 首调恒为 0，5 s 后准确）；
-- `proc.port_up` = 本机 `dsh_port`（默认 10899）TCP 探测是否在监听。
+- `proc.port` = 实际探测到的 DSH Web GUI 端口（**0 = 未探测到**；设备可以不显示，仅调试/PC 端自证）；
+- `proc.port_up` = 该端口是否在监听。探测是「TCP connect → 一次极简 HTTP 请求确认返回 `HTTP/`」，
+  避免把别的程序误判成 DSH（401/403 也算 Web 服务）；结果会缓存，端口变了/服务消失自动重探，
+  全部失败时隔 20 s 再扫，不会每 5 s 都扫。
 
 关闭：`--no-dsh` 启动或配置 `dsh_enabled: false`。带完整 `dsh`（含 `rate`）时整帧约 **780–800 B**，
 在契约 v1.1 的 **1 KB 上限 / 1024 B 缓冲**内（1 Hz 下带宽无压力）。
@@ -295,7 +348,9 @@ C:\Users\Lenovo\miniconda3\python.exe -m pytest companion -q
 托盘部分：状态→颜色/文案映射、Token 打码（`***`）、pystray 缺失时 `start()` 返回 False 不抛、
 菜单四项、退出回调、explorer/notepad 启动参数；DSH 部分：today/week 边界、峰谷价格、
 价格覆盖与未知模型回退、缓存增量命中与价格变更重建、坏文件跳过、字段缺失容错、
-进程/端口统计、线程异常不退出、`dsh` 可选字段。未装 Pillow 时仅真实绘图那条会 skip。
+进程/端口统计、线程异常不退出、`dsh` 可选字段；GUI 部分只测纯函数（token 打码/单位格式化、
+峰谷徽标文案与颜色、链路/设备/DSH 文案、设置校验、串口选项、自启命令、Tk 模块可导入），
+**测试里不创建 Tk 窗口**。未装 Pillow 时仅真实绘图那条会 skip。
 
 > `.venv` 只装**运行**依赖（psutil/pyserial）。要在 venv 里跑测试，先
 > `.\.venv\Scripts\python.exe -m pip install pytest`；或者直接用上面的基础 python 命令。
@@ -304,8 +359,13 @@ C:\Users\Lenovo\miniconda3\python.exe -m pytest companion -q
 
 - USB CDC 真机推帧 / 断线重连 / hello 握手：2026-11-10 在 COM10 上验证过 1 Hz 推帧连续、
   设备 hello 每 5 s 正确读取；**运行中拔线→黄→插回→绿的热切换仍待人工拔一次线**。
-- 1 Hz、约 420 B（不带 dsh）/ 约 700 B（带 dsh）每帧下的长时间稳定性、USB 丢帧率（需更长时间压测）。
+- 1 Hz、约 490 B（不带 dsh）/ 约 800 B（带 dsh）每帧下的长时间稳定性、USB 丢帧率（需更长时间压测）。
 - Windows 防火墙实际放行后设备端能否稳定轮询（本机未在局域网设备上验证）。
 - **托盘绿色状态**：2026-11-10 真机验证（COM10 插着时绿色；`--no-usb` 时黄色）；热插拔切换同上待人工。
 - **DSH 数字与 DSH 自身统计/官方账单的对账**：today/week token 与独立解压脚本逐条核对**完全一致**
   （2026-11-10），但没和 DSH UI 显示值、官方账单逐项对账；峰谷也简化了节假日。
+- **打包版在真正没装 Python 的机器上未实测**：本机把 `pcmond.exe` 拷到无 venv 的临时目录、并用
+  最小 PATH（只留 `C:\Windows\System32;C:\Windows`）跑过 `--once` 和 GUI（HTTP 200 / 优雅退出），
+  证明依赖已打进包，但没有第二台干净机器可用；首次 SmartScreen 提示也未实测。
+- **GUI 自启勾选**：打包版写 HKCU Run 的逻辑有单测/代码审查，但没做「重启登录后自动拉起」的真实验证；
+  源码态勾选走已有的启动文件夹脚本（该脚本在 2026-11-10 验证过）。

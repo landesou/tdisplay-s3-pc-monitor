@@ -90,7 +90,7 @@
 "dsh": {
   "today": {"tok": 1280000, "in": 620000, "out": 96000, "cache": 566000, "req": 366, "cost": 1.23},
   "week":  {"tok": 8800000, "req": 2100, "cache_pct": 87, "cost": 8.40},
-  "proc":  {"count": 10, "rss_mb": 906, "cpu_pct": 12, "port_up": true},
+  "proc":  {"count": 10, "rss_mb": 906, "cpu_pct": 12, "port": 8679, "port_up": true},
   "rate":  {"peak": false, "mult": 1, "until_min": 151}
 }
 ```
@@ -104,7 +104,8 @@
 | `week.tok/req/cost` | – | – | 近 7 天（滚动，含今天） |
 | `week.cache_pct` | int | % | 近 7 天缓存命中率 = cache / (in + cache) |
 | `proc.count/rss_mb/cpu_pct` | int | – / MiB / % | DSH 进程数、合计常驻内存、合计 CPU |
-| `proc.port_up` | bool | – | 本地 GUI 端口（默认 10899）是否在监听 |
+| `proc.port_up` | bool | – | 探测到的本地 GUI 端口是否在监听（`dsh_port=0` 时自动探测 8679/10899） |
+| `proc.port` | int | – | 实际探测到的 DSH Web GUI 端口，0=未探测到（v1.3 新增；设备可以不显示，仅调试/PC 端自证） |
 | `rate.peak` | bool | – | **当前**是否处于高峰时段（v1.2 新增，界面用红↑/绿↓ + 文字双重编码） |
 | `rate.mult` | int | 倍 | 当前单价相对空闲价的倍数：高峰 2、空闲 1 |
 | `rate.until_min` | int | 分钟 | 距下一次峰↔谷切换还有多少分钟（周末 → 下周一 9:00；≥ 0） |

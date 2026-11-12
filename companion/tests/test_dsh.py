@@ -73,12 +73,12 @@ def write_raw(root: Path, relative: str, payload: bytes, mtime: float) -> Path:
     return path
 
 
-def make_sampler(tmp_path: Path, monkeypatch, pricing=None, port: int = 10899, refresh_s: float = 5.0) -> DshSampler:
+def make_sampler(tmp_path: Path, monkeypatch, pricing=None, port: int = 0, refresh_s: float = 5.0) -> DshSampler:
     """进程统计替换成固定值，单测只关注 token 聚合。"""
     monkeypatch.setattr(
         DshSampler,
         "_collect_proc",
-        lambda self: {"count": 10, "rss_mb": 906, "cpu_pct": 12, "port_up": True},
+        lambda self, now=None: {"count": 10, "rss_mb": 906, "cpu_pct": 12, "port": 8679, "port_up": True},
     )
     return DshSampler(
         sessions_root=tmp_path / "sessions",
@@ -208,7 +208,7 @@ def test_today_and_week_buckets(tmp_path, monkeypatch):
         "cost": 3.0,
     }
     assert payload["week"] == {"tok": 2_500_000, "req": 3, "cache_pct": 0, "cost": 3.5}
-    assert payload["proc"] == {"count": 10, "rss_mb": 906, "cpu_pct": 12, "port_up": True}
+    assert payload["proc"] == {"count": 10, "rss_mb": 906, "cpu_pct": 12, "port": 8679, "port_up": True}
 
 
 def test_week_cache_pct_and_today_cache_field(tmp_path, monkeypatch):
@@ -349,6 +349,14 @@ def test_files_older_than_window_are_not_scanned(tmp_path, monkeypatch):
 # ---------------------------------------------------------------- 进程
 
 
+def _empty_processes(monkeypatch) -> None:
+    monkeypatch.setattr(dsh.psutil, "process_iter", lambda attrs=None: iter([]))
+
+
+def _port_sampler(tmp_path: Path, port: int) -> DshSampler:
+    return DshSampler(sessions_root=tmp_path / "s", cache_path=tmp_path / "c.json", port=port)
+
+
 def test_collect_proc_counts_rss_cpu_and_port(monkeypatch, tmp_path):
     class FakeProc:
         def __init__(self, name, rss, cpu):
@@ -368,23 +376,141 @@ def test_collect_proc_counts_rss_cpu_and_port(monkeypatch, tmp_path):
         FakeProc("notepad.exe", 10 * 1024 * 1024, 80.0),  # 名字不含 DSH，忽略
     ]
     monkeypatch.setattr(dsh.psutil, "process_iter", lambda attrs=None: iter(procs))
-    monkeypatch.setattr(dsh, "_port_listening", lambda *args, **kwargs: True)
-    sampler = DshSampler(sessions_root=tmp_path / "s", cache_path=tmp_path / "c.json")
+    monkeypatch.setattr(dsh, "probe_web_service", lambda *args, **kwargs: True)
+    sampler = DshSampler(sessions_root=tmp_path / "s", cache_path=tmp_path / "c.json", port=9999)
     stats = sampler._collect_proc()
     assert stats["count"] == 2
     assert stats["rss_mb"] == 900
     assert stats["cpu_pct"] == 12  # round(7.5 + 4.0)
+    assert stats["port"] == 9999
     assert stats["port_up"] is True
 
 
-def test_port_probe_reports_closed_on_oserror(monkeypatch):
+def test_configured_port_does_not_probe_other_ports(monkeypatch, tmp_path):
+    _empty_processes(monkeypatch)
+    calls = []
+
+    def probe(port):
+        calls.append(port)
+        return False
+
+    monkeypatch.setattr(dsh, "probe_web_service", probe)
+    stats = _port_sampler(tmp_path, 9999)._collect_proc(now=100.0)
+    assert calls == [9999]  # 非 0 配置：只探测指定端口，不碰 8679/10899
+    assert stats["port"] == 0
+    assert stats["port_up"] is False
+
+
+def test_configured_port_available(monkeypatch, tmp_path):
+    _empty_processes(monkeypatch)
+    monkeypatch.setattr(dsh, "probe_web_service", lambda port: port == 9999)
+    stats = _port_sampler(tmp_path, 9999)._collect_proc(now=100.0)
+    assert stats["port"] == 9999
+    assert stats["port_up"] is True
+
+
+def test_auto_detection_hits_first_available_and_caches(monkeypatch, tmp_path):
+    _empty_processes(monkeypatch)
+    calls = []
+
+    def probe(port):
+        calls.append(port)
+        return port == 8679
+
+    monkeypatch.setattr(dsh, "probe_web_service", probe)
+    sampler = _port_sampler(tmp_path, 0)
+    stats = sampler._collect_proc(now=100.0)
+    assert stats["port"] == 8679
+    assert stats["port_up"] is True
+    assert calls == [8679]  # 命中第一个可用端口后不再试 10899
+
+    calls.clear()
+    stats = sampler._collect_proc(now=105.0)  # 缓存命中：只验证 8679，不顺序扫描
+    assert stats["port"] == 8679
+    assert calls == [8679]
+
+
+def test_auto_detection_all_unavailable_throttles_then_rescans(monkeypatch, tmp_path):
+    _empty_processes(monkeypatch)
+    calls = []
+    monkeypatch.setattr(dsh, "probe_web_service", lambda port: calls.append(port) or False)
+    sampler = _port_sampler(tmp_path, 0)
+
+    stats = sampler._collect_proc(now=1000.0)
+    assert stats["port"] == 0 and stats["port_up"] is False
+    assert calls == [dsh.DEFAULT_DSH_PORTS[0], dsh.DEFAULT_DSH_PORTS[1]]
+
+    calls.clear()
+    sampler._collect_proc(now=1005.0)  # 失败后节流窗口内不重扫
+    assert calls == []
+
+    sampler._collect_proc(now=1000.0 + dsh.PORT_RESCAN_INTERVAL_S + 1)
+    assert calls == [dsh.DEFAULT_DSH_PORTS[0], dsh.DEFAULT_DSH_PORTS[1]]
+
+
+def test_detected_port_reprobes_when_service_moves(monkeypatch, tmp_path):
+    _empty_processes(monkeypatch)
+    state = {"live": {8679}}
+    monkeypatch.setattr(dsh, "probe_web_service", lambda port: port in state["live"])
+    sampler = _port_sampler(tmp_path, 0)
+
+    assert sampler._collect_proc(now=100.0)["port"] == 8679
+    state["live"] = {10899}  # 服务换个端口重新起来
+    stats = sampler._collect_proc(now=105.0)
+    assert stats["port"] == 10899 and stats["port_up"] is True
+
+
+def test_probe_result_is_not_ported_to_other_fields_on_exception(monkeypatch, tmp_path):
+    class FakeProc:
+        info = {"name": "DeepSeek Harness.exe"}
+
+        def memory_info(self):
+            return SimpleNamespace(rss=100 * 1024 * 1024)
+
+        def cpu_percent(self, interval=None):
+            return 3.0
+
+    monkeypatch.setattr(dsh.psutil, "process_iter", lambda attrs=None: iter([FakeProc()]))
+
+    def boom(port):
+        raise RuntimeError("probe crashed")
+
+    monkeypatch.setattr(dsh, "probe_web_service", boom)
+    stats = _port_sampler(tmp_path, 0)._collect_proc(now=100.0)
+    assert stats["count"] == 1
+    assert stats["rss_mb"] == 100
+    assert stats["port"] == 0 and stats["port_up"] is False
+
+
+def test_probe_web_service_returns_false_on_oserror(monkeypatch):
     import socket
 
     def boom(*args, **kwargs):
         raise OSError("connection refused")
 
     monkeypatch.setattr(socket, "create_connection", boom)
-    assert dsh._port_listening(10899) is False
+    assert dsh.probe_web_service(10899) is False
+
+
+def test_probe_web_service_rejects_non_http_response(monkeypatch):
+    class FakeSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def settimeout(self, timeout):
+            pass
+
+        def sendall(self, payload):
+            pass
+
+        def recv(self, size):
+            return b"SSH-2.0-OpenSSH_9.0\r\n"  # 别的程序：不是 HTTP
+
+    monkeypatch.setattr(dsh.socket, "create_connection", lambda *args, **kwargs: FakeSocket())
+    assert dsh.probe_web_service(10899) is False
 
 
 # ---------------------------------------------------------------- 线程

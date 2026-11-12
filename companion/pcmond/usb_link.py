@@ -193,9 +193,12 @@ class UsbLink:
             "wifi_pass": password,
             "api_token": self._config.token,
         }
-        address = lan_ip()
-        if address:
-            payload["api_url"] = f"http://{address}:{self._config.port}/api/stats"
+        if self._config.api_url:
+            payload["api_url"] = self._config.api_url  # GUI/配置文件里手改过就用它
         else:
-            LOGGER.warning("未探测到局域网地址，cfg 帧不含 api_url")
+            address = lan_ip()
+            if address:
+                payload["api_url"] = f"http://{address}:{self._config.port}/api/stats"
+            else:
+                LOGGER.warning("未探测到局域网地址，cfg 帧不含 api_url")
         return payload

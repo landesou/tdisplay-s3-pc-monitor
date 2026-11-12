@@ -105,6 +105,19 @@ def test_cfg_skipped_without_wifi_credentials():
     assert link._build_cfg() is None
 
 
+def test_cfg_uses_manual_api_url_override(monkeypatch):
+    monkeypatch.setattr("pcmond.usb_link.lan_ip", lambda: "192.168.1.10")
+    config = Config(
+        token="tok",
+        port=8787,
+        wifi_ssid="MyWiFi",
+        wifi_pass="pw",
+        api_url="http://10.0.0.5:9000/api/stats",
+    )
+    payload = UsbLink(FakeSampler(), config)._build_cfg()
+    assert payload["api_url"] == "http://10.0.0.5:9000/api/stats"
+
+
 def test_hello_need_cfg_writes_one_cfg_line(monkeypatch):
     monkeypatch.setattr("pcmond.usb_link.lan_ip", lambda: "10.0.0.2")
     link = UsbLink(FakeSampler(), Config(token="tok", wifi_ssid="S", wifi_pass="P"))
