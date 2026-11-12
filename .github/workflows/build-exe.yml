@@ -24,6 +24,11 @@ jobs:
     defaults:
       run:
         shell: pwsh
+    env:
+      # Windows runner 的控制台编码是 cp1252：脚本里任何中文 print 都会 UnicodeEncodeError
+      # （第一次 CI 就是挂在 make_icon.py 打印"图标已生成"这句上）。
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
 
     steps:
       - uses: actions/checkout@v4

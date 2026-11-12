@@ -70,14 +70,22 @@ pyz = PYZ(a.pure)
 # 本机 PATH 里有 ModelSim 的旧 Tcl 8.6.5（D:\modeltech64_10.6e\win64），PyInstaller 会按
 # 依赖搜索顺序把它的 tcl86t.dll/tk86t.dll 打进包，和 conda 的 tcl8.6 数据（8.6.15）版本冲突
 # → "version conflict for package Tcl: have 8.6.5, need exactly 8.6.15"。这里显式换成 conda 的。
+#
+# 但**只在 conda 环境里做这个替换**：在普通 CPython（比如 GitHub Actions 的 setup-python）上
+# 没有 Library/bin，若无条件删除 a.binaries 里的 tcl/tk 又不补回来，打出来的 exe 会在启动 Tk 时
+# 直接失败（而 --once 冒烟测试只跑 CLI，发现不了）。所以用 isdir 守护。
 _TCL_DLLS = ("tcl86t.dll", "tk86t.dll", "zlib.dll")
-a.binaries = [entry for entry in a.binaries if os.path.basename(str(entry[0])).lower() not in _TCL_DLLS]
-for _dll in _TCL_DLLS:
-    _source = os.path.join(CONDA_LIB, _dll)
-    if os.path.exists(_source):
-        a.binaries.append((_dll, _source, "BINARY"))
-    else:
-        print(f"WARNING: 缺少 {_source}")
+if os.path.isdir(CONDA_LIB):
+    a.binaries = [entry for entry in a.binaries
+                  if os.path.basename(str(entry[0])).lower() not in _TCL_DLLS]
+    for _dll in _TCL_DLLS:
+        _source = os.path.join(CONDA_LIB, _dll)
+        if os.path.exists(_source):
+            a.binaries.append((_dll, _source, "BINARY"))
+        else:
+            print(f"WARNING: 缺少 {_source}")
+else:
+    print(f"跳过 Tcl/Tk 替换：{CONDA_LIB} 不存在（非 conda 环境，保留 PyInstaller 自己的 tcl/tk）")
 
 exe = EXE(
     pyz,
